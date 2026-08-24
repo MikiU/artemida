@@ -1,0 +1,52 @@
+# Szablon konfiguracji serwisów. Skopiuj do sites.yaml i uzupełnij własnymi danymi.
+#   cp sites.example.yaml sites.yaml   (Windows: copy sites.example.yaml sites.yaml)
+#
+# gsc_property: dokładnie jak w Google Search Console:
+#   - URL-prefix property:  "https://www.example.com/"
+#   - Domain property:      "sc-domain:example.com"
+# base_url: adres domeny (walidacja hostów sitemap).
+# category_sitemaps: lista URL-i sitemap kategorii (jedna lub kilka; .gz obsługiwane).
+# ymyl_paths: top-level kategorie uznane za YMYL (finanse, polityka, zdrowie).
+
+# Globalne YMYL dla serwisów bez własnej listy.
+ymyl_paths:
+  - "Polityka"
+  - "Pieniadze"
+  - "Biznes"
+  - "Zdrowie"
+
+# Ścieżki wykluczone z YMYL mimo dopasowania (mają pierwszeństwo).
+ymyl_exclude_paths:
+  - "Wydarzenia > Pogoda"
+
+sites:
+
+  example:
+    name: "Example"
+    gsc_property: "https://www.example.com/"
+    base_url: "https://www.example.com/"
+    category_sitemaps:
+      - "https://www.example.com/sitemap-categories.xml"
+    ymyl_paths:
+      - "Polityka"
+      - "Pieniadze"
+
+  example_two:
+    name: "Example Two"
+    gsc_property: "sc-domain:example.org"
+    base_url: "https://example.org/"
+    category_sitemaps:
+      - "https://example.org/sitemap.xml"
+    ymyl_paths: []
+
+# Opcjonalne: ręczne dopasowanie kategorii między serwisami (tryb 1).
+category_groups:
+
+  news:
+    label: "Wiadomości"
+    example:
+      paths:
+        - "Polityka"
+    example_two:
+      paths:
+        - "Wiadomosci"

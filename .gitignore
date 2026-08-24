@@ -1,0 +1,27 @@
+# Sekrety i konfiguracja lokalna
+.env
+credentials.json
+*.json.key
+.streamlit/secrets.toml
+
+# Lokalna konfiguracja serwisów (własne domeny). Szablon: sites.example.yaml
+sites.yaml
+
+# Wyniki
+output/*.csv
+output/**/
+
+# Lokalny cache GSC
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
