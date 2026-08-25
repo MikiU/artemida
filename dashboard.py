@@ -8,15 +8,24 @@ więc cała matematyka to te same, przetestowane funkcje – dashboard je tylko 
 """
 from __future__ import annotations
 
+import io
 import os
+import re
+import zipfile
 from datetime import date, timedelta
 
 import streamlit as st
 
 import app  # reużycie funkcji budujących DataFrame (bez duplikacji logiki)
-from analysis import Period, analyze_site, analyze_site_multi_source, analyze_site_sources
+from analysis import (
+    Period,
+    analyze_site,
+    analyze_site_multi_source,
+    analyze_site_sources,
+    build_url_metrics,
+)
 from config import ConfigError, load_global_config, load_sites
-from services.gsc_service import GSCError
+from services.gsc_service import GSCError, get_gsc_data
 from services.sitemap_service import SitemapError
 
 st.set_page_config(page_title="GSC Analyzer", layout="wide")
@@ -73,6 +82,7 @@ mode = st.sidebar.radio(
         "2 – Ranking kategorii (wiele)",
         "3 – Search/Discover/YMYL",
         "4 – Jeden serwis (Search/Discover/News)",
+        "5 – Lista URL-i → dane",
     ],
 )
 selected = st.sidebar.multiselect(
@@ -92,6 +102,8 @@ PRESETS = {
 single_site = None
 preset_id = 7
 sources_sel: list[str] = []
+url_sources: list[str] = []
+compare_urls = False
 if mode.startswith("4"):
     single_site = st.sidebar.selectbox(
         "Serwis", site_keys, format_func=lambda k: sites[k].name
@@ -104,27 +116,46 @@ if mode.startswith("4"):
         default=["web", "discover", "news"],
         format_func=lambda t: app.SOURCE_LABELS[t],
     )
+elif mode.startswith("5"):
+    single_site = st.sidebar.selectbox(
+        "Serwis", site_keys, format_func=lambda k: sites[k].name, key="m5_site"
+    )
+    url_sources = st.sidebar.multiselect(
+        "Źródła",
+        ["web", "discover", "news"],
+        default=["web"],
+        format_func=lambda t: app.SOURCE_LABELS[t],
+        key="m5_src",
+    )
+    compare_urls = st.sidebar.checkbox("Porównaj dwa okresy", value=False)
 
 today = date.today()
 
-# Kalendarze pokazujemy tylko tam, gdzie są używane: tryby 1-3 oraz tryb 4 z
-# opcją "Własne daty". Dla presetów daty są wyliczane, więc kalendarze byłyby mylące.
-_need_pickers = (not mode.startswith("4")) or (preset_id == 7)
+# Kalendarze pokazujemy tam, gdzie są używane. W trybie 5 "Previous" tylko przy
+# włączonym porównaniu – inaczej wystarczy jeden okres (start–koniec).
+_need_current = (not mode.startswith("4")) or (preset_id == 7)
+_need_previous = _need_current and not (mode.startswith("5") and not compare_urls)
 cur_start = cur_end = prev_start = prev_end = None
-if _need_pickers:
+if _need_current:
     st.sidebar.subheader("CURRENT PERIOD")
     cur_start = st.sidebar.date_input("Current start", today - timedelta(days=31))
     cur_end = st.sidebar.date_input("Current end", today - timedelta(days=2))
-    st.sidebar.subheader("PREVIOUS PERIOD")
-    prev_start = st.sidebar.date_input("Previous start", today - timedelta(days=62))
-    prev_end = st.sidebar.date_input("Previous end", today - timedelta(days=33))
+    if _need_previous:
+        st.sidebar.subheader("PREVIOUS PERIOD")
+        prev_start = st.sidebar.date_input("Previous start", today - timedelta(days=62))
+        prev_end = st.sidebar.date_input("Previous end", today - timedelta(days=33))
     _cd = (cur_end - cur_start).days + 1
-    _pd = (prev_end - prev_start).days + 1
-    st.sidebar.caption(f"Wybrano — Current: {_cd} dni · Previous: {_pd} dni")
-    if cur_start > cur_end or prev_start > prev_end:
-        st.sidebar.error("Data startowa jest późniejsza niż końcowa.")
-    elif _cd != _pd:
-        st.sidebar.warning(f"Różna długość okresów: {_cd} vs {_pd} dni.")
+    if _need_previous:
+        _pd = (prev_end - prev_start).days + 1
+        st.sidebar.caption(f"Wybrano — Current: {_cd} dni · Previous: {_pd} dni")
+        if cur_start > cur_end or prev_start > prev_end:
+            st.sidebar.error("Data startowa jest późniejsza niż końcowa.")
+        elif _cd != _pd:
+            st.sidebar.warning(f"Różna długość okresów: {_cd} vs {_pd} dni.")
+    else:
+        st.sidebar.caption(f"Wybrano — okres: {_cd} dni")
+        if cur_start > cur_end:
+            st.sidebar.error("Data startowa jest późniejsza niż końcowa.")
 elif mode.startswith("4"):
     _c, _p = app._compute_preset_periods(preset_id)
     _cd = (date.fromisoformat(_c.end) - date.fromisoformat(_c.start)).days + 1
@@ -143,10 +174,19 @@ def _period(s, e):
 
 
 def _check_periods():
+    if cur_start is None or cur_end is None:
+        st.error("Brak wybranego okresu.")
+        return False
+    if cur_start > cur_end:
+        st.error("Data startowa jest późniejsza niż końcowa.")
+        return False
     cur_days = (cur_end - cur_start).days + 1
+    if prev_start is None or prev_end is None:
+        st.caption(f"Okres: {cur_days} dni")
+        return True
     prev_days = (prev_end - prev_start).days + 1
     st.caption(f"Current: {cur_days} dni · Previous: {prev_days} dni")
-    if cur_start > cur_end or prev_start > prev_end:
+    if prev_start > prev_end:
         st.error("Data startowa jest późniejsza niż końcowa.")
         return False
     if cur_days != prev_days:
@@ -330,25 +370,18 @@ M4_COLS = [
 ]
 
 
-def render_mode4(site_key, preset, sources_types):
+def _compute_mode4(site_key, preset, sources_types):
+    """Pobiera dane dla trybu 4 i zwraca komplet wyników (bundle) lub None."""
     if not sources_types:
         st.info("Wybierz co najmniej jedno źródło (Search/Discover/News).")
-        return
+        return None
     site = sites[site_key]
     if preset == 7:
         if not _check_periods():
-            return
+            return None
         current, previous = _period(cur_start, cur_end), _period(prev_start, prev_end)
     else:
         current, previous = app._compute_preset_periods(preset)
-    cd = (date.fromisoformat(current.end) - date.fromisoformat(current.start)).days + 1
-    pd_ = (date.fromisoformat(previous.end) - date.fromisoformat(previous.start)).days + 1
-    if cd != pd_:
-        st.warning(f"Okresy mają różną długość ({cd} vs {pd_} dni) – porównanie może być zaburzone.")
-    st.info(
-        f"**{site.name}** — CURRENT {current.start}…{current.end} ({cd} dni)  "
-        f"vs  PREVIOUS {previous.start}…{previous.end} ({pd_} dni)"
-    )
     try:
         with st.spinner("Pobieram dane GSC…"):
             results = analyze_site_multi_source(
@@ -357,7 +390,52 @@ def render_mode4(site_key, preset, sources_types):
             )
     except (GSCError, SitemapError) as exc:
         st.error(f"{site.name}: {exc}")
-        return
+        return None
+    return {
+        "site_key": site_key,
+        "site_name": site.name,
+        "current": current,
+        "previous": previous,
+        "sources": list(sources_types),
+        "results": results,
+    }
+
+
+def _mode4_zip(bundle) -> bytes:
+    """Buduje ZIP z osobnymi CSV (tree/pages/daily) dla każdego źródła."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for source_type in bundle["sources"]:
+            sa = bundle["results"][source_type]
+            zf.writestr(f"{source_type}_category_tree.csv", sa.tree.to_csv(index=False))
+            zf.writestr(f"{source_type}_pages.csv", sa.pages.to_csv(index=False))
+            if not sa.daily.empty:
+                zf.writestr(f"{source_type}_daily.csv", sa.daily.to_csv(index=False))
+    return buffer.getvalue()
+
+
+def _render_mode4(bundle):
+    current, previous = bundle["current"], bundle["previous"]
+    cd = (date.fromisoformat(current.end) - date.fromisoformat(current.start)).days + 1
+    pd_ = (date.fromisoformat(previous.end) - date.fromisoformat(previous.start)).days + 1
+    if cd != pd_:
+        st.warning(f"Okresy mają różną długość ({cd} vs {pd_} dni) – porównanie może być zaburzone.")
+    st.info(
+        f"**{bundle['site_name']}** — CURRENT {current.start}…{current.end} ({cd} dni)  "
+        f"vs  PREVIOUS {previous.start}…{previous.end} ({pd_} dni)"
+    )
+
+    st.download_button(
+        "⬇️ Pobierz WSZYSTKIE raporty (ZIP: Search + Discover + News)",
+        _mode4_zip(bundle),
+        file_name=f"{bundle['site_key']}_{current.start}_{current.end}.zip",
+        mime="application/zip",
+        type="primary",
+    )
+    st.caption("Jedno pobranie = osobne CSV dla każdego źródła (bez ponownej analizy).")
+
+    results = bundle["results"]
+    sources_types = bundle["sources"]
     tabs = st.tabs([app.SOURCE_LABELS[t] for t in sources_types])
     for tab, t in zip(tabs, sources_types):
         with tab:
@@ -389,10 +467,152 @@ def render_mode4(site_key, preset, sources_types):
             _dl(tree, f"{t}_category_tree.csv")
 
 
-if run:
-    if mode.startswith("4"):
-        render_mode4(single_site, preset_id, sources_sel)
-    elif not selected:
+def _parse_urls(pasted, uploaded):
+    text = pasted or ""
+    if uploaded is not None:
+        try:
+            text += "\n" + uploaded.getvalue().decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+    found = re.findall(r"https?://\S+", text)
+    cleaned = [u.strip().strip('",;)') for u in found]
+    return list(dict.fromkeys(cleaned))
+
+
+def _compute_mode5(site_key, urls, sources_types, compare):
+    site = sites[site_key]
+    cred = global_config.google_credentials_path
+    current = _period(cur_start, cur_end)
+    previous = _period(prev_start, prev_end) if compare else None
+    results = {}
+    totals = {}
+    for t in sources_types:
+        try:
+            with st.spinner(f"Pobieram {app.SOURCE_LABELS[t]}…"):
+                cur_df = get_gsc_data(
+                    current.start, current.end, site.gsc_property, cred,
+                    dimensions=("page",), search_type=t, use_cache=use_cache,
+                )
+                prev_df = None
+                if compare:
+                    prev_df = get_gsc_data(
+                        previous.start, previous.end, site.gsc_property, cred,
+                        dimensions=("page",), search_type=t, use_cache=use_cache,
+                    )
+        except GSCError as exc:
+            st.warning(f"{site.name} [{app.SOURCE_LABELS[t]}]: {exc}")
+            continue
+        results[t] = build_url_metrics(urls, cur_df, prev_df, with_position=(t == "web"))
+        # Suma całego serwisu w okresie – do policzenia udziału %.
+        totals[t] = {
+            "clicks": float(cur_df["clicks"].sum()) if not cur_df.empty else 0.0,
+            "impressions": float(cur_df["impressions"].sum()) if not cur_df.empty else 0.0,
+        }
+    if not results:
+        return None
+    return {
+        "site_key": site_key,
+        "site_name": site.name,
+        "current": current,
+        "previous": previous,
+        "sources": list(sources_types),
+        "results": results,
+        "totals": totals,
+    }
+
+
+def _render_mode5_results(bundle):
+    cur, prev = bundle["current"], bundle["previous"]
+    period_txt = f"CURRENT {cur.start}…{cur.end}"
+    if prev:
+        period_txt += f"  vs PREVIOUS {prev.start}…{prev.end}"
+    st.info(f"**{bundle['site_name']}** — {period_txt}")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for t, df in bundle["results"].items():
+            zf.writestr(f"{t}_urls.csv", df.to_csv(index=False))
+    st.download_button(
+        "⬇️ Pobierz WSZYSTKIE (ZIP)", buffer.getvalue(),
+        file_name=f"{bundle['site_key']}_urls.zip", mime="application/zip", type="primary",
+    )
+
+    tabs = st.tabs([app.SOURCE_LABELS[t] for t in bundle["sources"]])
+    for tab, t in zip(tabs, bundle["sources"]):
+        with tab:
+            df = bundle["results"][t]
+            found = int((df["current_clicks"] > 0).sum())
+            st.caption(f"{len(df)} URL-i · z ruchem w bieżącym okresie: {found}")
+            st.dataframe(df, use_container_width=True)
+            _dl(df, f"{t}_urls.csv")
+            _render_mode5_summary(df, bundle["totals"].get(t, {}))
+
+
+def _render_mode5_summary(df, totals):
+    """Podsumowanie pod tabelą: sumy clicks/impressions, średni CTR i udział %."""
+    import math
+
+    sel_clicks = float(df["current_clicks"].sum())
+    sel_impr = float(df["current_impressions"].sum())
+    mean_ctr = df["current_ctr"].mean() if "current_ctr" in df.columns else math.nan
+    total_clicks = totals.get("clicks", 0.0)
+    total_impr = totals.get("impressions", 0.0)
+    pct_clicks = (sel_clicks / total_clicks * 100.0) if total_clicks else math.nan
+    pct_impr = (sel_impr / total_impr * 100.0) if total_impr else math.nan
+
+    def _num(v):
+        return f"{int(v):,}".replace(",", " ")
+
+    def _pct(v):
+        return "—" if math.isnan(v) else f"{v:.1f}% całości"
+
+    st.markdown("**Podsumowanie (wybrane URL-e)**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Suma clicks", _num(sel_clicks), _pct(pct_clicks))
+    c2.metric("Suma impressions", _num(sel_impr), _pct(pct_impr))
+    c3.metric(
+        "Średni CTR",
+        "—" if (isinstance(mean_ctr, float) and math.isnan(mean_ctr)) else f"{mean_ctr * 100:.2f}%",
+    )
+    st.caption(
+        f"Cały serwis w okresie: {_num(total_clicks)} clicks · {_num(total_impr)} impressions."
+    )
+
+
+def render_mode5():
+    st.subheader("Lista URL-i → dane GSC")
+    pasted = st.text_area("Wklej URL-e (jeden na linię)", height=160, key="m5_text")
+    uploaded = st.file_uploader("albo wgraj plik .txt/.csv", type=["txt", "csv"], key="m5_file")
+    urls = _parse_urls(pasted, uploaded)
+    st.caption(f"Wczytano {len(urls)} unikalnych URL-i.")
+    if run:
+        if not url_sources:
+            st.warning("Wybierz co najmniej jedno źródło.")
+        elif not urls:
+            st.warning("Wklej albo wgraj listę URL-i.")
+        elif _check_periods():
+            bundle = _compute_mode5(single_site, urls, url_sources, compare_urls)
+            if bundle:
+                st.session_state["m5_bundle"] = bundle
+    saved = st.session_state.get("m5_bundle")
+    if saved:
+        _render_mode5_results(saved)
+
+
+if mode.startswith("4"):
+    if run:
+        bundle = _compute_mode4(single_site, preset_id, sources_sel)
+        if bundle is not None:
+            st.session_state["m4_bundle"] = bundle
+    saved = st.session_state.get("m4_bundle")
+    if saved:
+        _render_mode4(saved)
+    else:
+        st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
+elif mode.startswith("5"):
+    render_mode5()
+elif run:
+    if not selected:
         st.info("Wybierz serwisy w panelu po lewej.")
     elif _check_periods():
         if mode.startswith("1"):

@@ -389,3 +389,64 @@ def analyze_site_multi_source(
         )
     return results
 
+
+def build_url_metrics(
+    urls: list[str],
+    current_df: pd.DataFrame,
+    previous_df: pd.DataFrame | None = None,
+    with_position: bool = True,
+) -> pd.DataFrame:
+    """Zwraca metryki GSC per URL z listy (clicks/impressions/ctr/position).
+
+    Dane pochodzą z wcześniej pobranego DataFrame `page`. URL-e spoza danych mają
+    0 klików/wyświetleń i puste CTR/pozycję. Gdy podano previous_df, dolicza zmiany.
+    """
+    base = pd.DataFrame({"url": list(dict.fromkeys(u for u in urls if u))})
+
+    def _prep(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
+        renamed = df.rename(
+            columns={
+                "page": "url",
+                "clicks": f"{prefix}_clicks",
+                "impressions": f"{prefix}_impressions",
+                "ctr": f"{prefix}_ctr",
+                "position": f"{prefix}_position",
+            }
+        )
+        cols = [
+            "url",
+            f"{prefix}_clicks",
+            f"{prefix}_impressions",
+            f"{prefix}_ctr",
+            f"{prefix}_position",
+        ]
+        return renamed[[c for c in cols if c in renamed.columns]]
+
+    result = base.merge(_prep(current_df, "current"), on="url", how="left")
+    if previous_df is not None:
+        result = result.merge(_prep(previous_df, "previous"), on="url", how="left")
+        result["clicks_change"] = (
+            result["current_clicks"].fillna(0) - result["previous_clicks"].fillna(0)
+        )
+        result["impressions_change"] = (
+            result["current_impressions"].fillna(0)
+            - result["previous_impressions"].fillna(0)
+        )
+        if with_position and {"current_position", "previous_position"} <= set(
+            result.columns
+        ):
+            result["position_change"] = (
+                result["current_position"] - result["previous_position"]
+            )
+
+    for col in result.columns:
+        if "clicks" in col or "impressions" in col:
+            result[col] = result[col].fillna(0)
+
+    if not with_position:
+        result = result.drop(
+            columns=[c for c in result.columns if "position" in c], errors="ignore"
+        )
+    return result
+
+
