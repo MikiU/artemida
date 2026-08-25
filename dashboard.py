@@ -8,6 +8,7 @@ więc cała matematyka to te same, przetestowane funkcje – dashboard je tylko 
 """
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 
 import streamlit as st
@@ -20,6 +21,34 @@ from services.sitemap_service import SitemapError
 
 st.set_page_config(page_title="GSC Analyzer", layout="wide")
 st.title("GSC Analyzer – dashboard")
+
+# Hosting (Streamlit Cloud): przenieś sekrety do środowiska, by config je zobaczył.
+for _secret_key in ("GOOGLE_CREDENTIALS_JSON", "SITES_YAML", "APP_PASSWORD"):
+    try:
+        if _secret_key in st.secrets:
+            os.environ[_secret_key] = str(st.secrets[_secret_key])
+    except Exception:
+        pass
+
+
+def _password_gate() -> None:
+    """Prosta bramka hasłem, jeśli ustawiono APP_PASSWORD (sekret/env)."""
+    password = os.environ.get("APP_PASSWORD", "").strip()
+    if not password:
+        st.sidebar.caption("⚠️ Dostęp otwarty (brak APP_PASSWORD).")
+        return
+    if st.session_state.get("_auth_ok"):
+        return
+    entered = st.text_input("Hasło dostępu", type="password")
+    if entered and entered == password:
+        st.session_state["_auth_ok"] = True
+        st.rerun()
+    if entered:
+        st.error("Błędne hasło.")
+    st.stop()
+
+
+_password_gate()
 
 
 @st.cache_resource

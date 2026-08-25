@@ -49,14 +49,20 @@ class SitesConfig:
 
 
 def load_global_config() -> GlobalConfig:
-    """Wczytuje globalną konfigurację z .env i sprawdza plik credentials."""
+    """Wczytuje globalną konfigurację: credentials z pliku lub z JSON-a w środowisku."""
     load_dotenv()
+
+    # Hosting: pełny JSON klucza w zmiennej (np. Streamlit secrets) zamiast pliku.
+    credentials_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
+    if credentials_json:
+        return GlobalConfig(google_credentials_path=credentials_json)
 
     credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "").strip()
     if not credentials_path:
         raise ConfigError(
-            "Brak GOOGLE_CREDENTIALS_PATH w pliku .env.\n"
-            "Skopiuj .env.example do .env i wskaż plik klucza Service Account."
+            "Brak GOOGLE_CREDENTIALS_JSON lub GOOGLE_CREDENTIALS_PATH.\n"
+            "Lokalnie: skopiuj .env.example do .env i wskaż plik klucza Service Account.\n"
+            "Hosting: ustaw sekret GOOGLE_CREDENTIALS_JSON z pełną treścią klucza JSON."
         )
     if not os.path.exists(credentials_path):
         raise ConfigError(
@@ -67,23 +73,32 @@ def load_global_config() -> GlobalConfig:
 
 
 def load_sites(path: str = "sites.yaml") -> SitesConfig:
-    """Wczytuje konfigurację serwisów i grup kategorii z pliku YAML."""
-    if not os.path.exists(path):
-        raise ConfigError(
-            f"Nie znaleziono pliku konfiguracji serwisów: '{path}'.\n"
-            "Utwórz sites.yaml (przykład znajdziesz w repo)."
-        )
-
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            raw = yaml.safe_load(handle) or {}
-    except yaml.YAMLError as exc:
-        raise ConfigError(f"Błędny plik YAML '{path}': {exc}") from exc
+    """Wczytuje konfigurację serwisów z pliku YAML lub ze zmiennej SITES_YAML."""
+    raw_yaml = os.getenv("SITES_YAML", "").strip()
+    if raw_yaml:
+        source = "SITES_YAML"
+        try:
+            raw = yaml.safe_load(raw_yaml) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"Błędny YAML w SITES_YAML: {exc}") from exc
+    else:
+        source = path
+        if not os.path.exists(path):
+            raise ConfigError(
+                f"Nie znaleziono pliku konfiguracji serwisów: '{path}'.\n"
+                "Lokalnie: skopiuj sites.example.yaml do sites.yaml.\n"
+                "Hosting: ustaw sekret SITES_YAML z treścią konfiguracji."
+            )
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = yaml.safe_load(handle) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"Błędny plik YAML '{path}': {exc}") from exc
 
     raw_sites = raw.get("sites")
     if not isinstance(raw_sites, dict) or not raw_sites:
         raise ConfigError(
-            f"Plik '{path}' nie zawiera sekcji 'sites' z co najmniej jednym serwisem."
+            f"'{source}' nie zawiera sekcji 'sites' z co najmniej jednym serwisem."
         )
 
     # Globalna lista YMYL stosowana dla serwisów bez własnej.

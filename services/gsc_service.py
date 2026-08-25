@@ -6,6 +6,7 @@ użytkownik property w Google Search Console (patrz README).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 
 import pandas as pd
@@ -27,16 +28,25 @@ class GSCError(Exception):
     """Błąd komunikacji z Google Search Console."""
 
 
-def _build_service(credentials_path: str):
-    """Tworzy klienta Search Console API z pliku Service Account."""
+def _build_service(credentials_ref: str):
+    """Tworzy klienta Search Console API z pliku Service Account albo z JSON-a.
+
+    credentials_ref może być ścieżką do pliku JSON lub pełną treścią JSON
+    (np. z sekretu na hostingu).
+    """
     try:
-        credentials = service_account.Credentials.from_service_account_file(
-            credentials_path, scopes=SCOPES
-        )
-    except (ValueError, KeyError) as exc:
-        raise GSCError(
-            f"Nieprawidłowy plik credentials '{credentials_path}': {exc}"
-        ) from exc
+        ref = credentials_ref.strip()
+        if ref.startswith("{"):
+            info = json.loads(ref)
+            credentials = service_account.Credentials.from_service_account_info(
+                info, scopes=SCOPES
+            )
+        else:
+            credentials = service_account.Credentials.from_service_account_file(
+                ref, scopes=SCOPES
+            )
+    except (ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise GSCError(f"Nieprawidłowe credentials Service Account: {exc}") from exc
 
     return build("searchconsole", "v1", credentials=credentials, cache_discovery=False)
 

@@ -273,6 +273,28 @@ CLI (`python app.py`) działa dalej niezależnie.
 
 ---
 
+## 3c. Publikacja jako jeden link (Streamlit Community Cloud)
+
+Aby udostępnić dashboard pod jednym adresem, bez plików `.env`/`credentials.json`
+na serwerze, użyj sekretów.
+
+1. Wypchnij repo na GitHub (bez sekretów – patrz `.gitignore`).
+2. Wejdź na https://share.streamlit.io → **New app** → wskaż repo i `dashboard.py`.
+3. **Settings → Secrets** – wklej (wzór: `.streamlit/secrets.toml.example`):
+   - `GOOGLE_CREDENTIALS_JSON` – pełna treść klucza Service Account (JSON),
+   - `SITES_YAML` – zawartość Twojego `sites.yaml`,
+   - `APP_PASSWORD` – hasło dostępu (zalecane przy publicznym linku).
+4. Deploy. Aplikacja wczyta credentials i serwisy z sekretów.
+
+> ⚠️ **Bezpieczeństwo:** hostowany dashboard odpytuje Twoje GSC. Każdy, kto ma
+> link (i hasło), zobaczy dane skonfigurowanych domen. Ustaw `APP_PASSWORD`
+> i/lub w Streamlit Cloud ustaw aplikację jako **prywatną** (allowlist e-mail).
+> Konto serwisowe musi mieć dostęp w GSC do wszystkich property z `SITES_YAML`.
+
+Lokalnie zamiast pliku możesz też użyć `.streamlit/secrets.toml` (gitignored).
+
+---
+
 ## 4. Testy
 
 ```powershell
