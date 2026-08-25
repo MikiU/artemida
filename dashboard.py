@@ -28,8 +28,8 @@ from config import ConfigError, load_global_config, load_sites
 from services.gsc_service import GSCError, get_gsc_data
 from services.sitemap_service import SitemapError
 
-st.set_page_config(page_title="GSC Analyzer", layout="wide")
-st.title("GSC Analyzer – dashboard")
+st.set_page_config(page_title="Artemida", layout="wide")
+st.title("Artemida — analiza Google Search Console")
 
 # Hosting (Streamlit Cloud): przenieś sekrety do środowiska, by config je zobaczył.
 for _secret_key in ("GOOGLE_CREDENTIALS_JSON", "SITES_YAML", "APP_PASSWORD"):
@@ -597,6 +597,52 @@ def render_mode5():
     saved = st.session_state.get("m5_bundle")
     if saved:
         _render_mode5_results(saved)
+
+
+MODE_DESCRIPTIONS = {
+    "1": (
+        "**Tryb 1 — Porównaj DWA serwisy.** Szczegółowe porównanie dwóch domen "
+        "w tych samych okresach: tabela SITE COMPARISON, różnica dynamiki (pp), "
+        "porównanie grup kategorii, kategorie top-level każdej domeny.\n\n"
+        "➡️ Wybierz **dokładnie 2 serwisy** oraz okresy CURRENT i PREVIOUS, kliknij "
+        "**Uruchom analizę**."
+    ),
+    "2": (
+        "**Tryb 2 — Ranking kategorii (wiele serwisów).** Wspólna lista kategorii "
+        "ze wszystkich wybranych domen, posortowana po zmianie klików — od razu "
+        "widać, które kategorie najbardziej urosły i spadły.\n\n"
+        "➡️ Wybierz **2+ serwisy** i dwa okresy, kliknij **Uruchom analizę**."
+    ),
+    "3": (
+        "**Tryb 3 — Search vs Discover + YMYL.** Rozdziela ruch z Search (web) i "
+        "Discover, rozbija po urządzeniach (mobile/desktop) i dzieli kategorie na "
+        "YMYL vs non-YMYL (finanse/polityka/zdrowie kontra reszta).\n\n"
+        "➡️ Wybierz **2+ serwisy** i dwa okresy, kliknij **Uruchom analizę**."
+    ),
+    "4": (
+        "**Tryb 4 — Jeden serwis po kategoriach.** Analiza jednej domeny: które "
+        "kategorie urosły/spadły, ile mają URL-i, wykres ruchu dzień po dniu. "
+        "Osobno **Search / Discover / News**. Gotowe presety dat (tydzień, miesiąc, "
+        "rok do roku) lub własny zakres.\n\n"
+        "➡️ Wybierz **serwis**, **okres** (preset albo Własne daty) i **źródła**, "
+        "kliknij **Uruchom analizę**. Wyniki pobierzesz jednym ZIP-em."
+    ),
+    "5": (
+        "**Tryb 5 — Lista URL-i → dane.** Wklej lub wgraj listę adresów i dostań dla "
+        "nich **clicks, impressions, CTR i pozycję** (pozycja tylko dla Search). "
+        "Opcjonalnie porównanie dwóch okresów. Pod tabelą sumy, średni CTR i udział "
+        "% w całym ruchu serwisu.\n\n"
+        "➡️ Wybierz **serwis** i **źródła**, ustaw okres (lub zaznacz „Porównaj dwa "
+        "okresy”), wklej/wgraj URL-e, kliknij **Uruchom analizę**."
+    ),
+}
+
+with st.expander("ℹ️ Jak używać — opis wszystkich trybów", expanded=False):
+    for _key in ("1", "2", "3", "4", "5"):
+        st.markdown(MODE_DESCRIPTIONS[_key])
+        st.markdown("---")
+
+st.info(MODE_DESCRIPTIONS.get(mode[0], ""))
 
 
 if mode.startswith("4"):
