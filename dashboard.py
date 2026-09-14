@@ -83,6 +83,7 @@ mode = st.sidebar.radio(
         "3 – Search/Discover/YMYL",
         "4 – Jeden serwis (Search/Discover/News)",
         "5 – Lista URL-i → dane",
+        "6 – Grupa: przegląd wszystkich serwisów",
     ],
 )
 selected = st.sidebar.multiselect(
@@ -116,6 +117,16 @@ if mode.startswith("4"):
         default=["web", "discover", "news"],
         format_func=lambda t: app.SOURCE_LABELS[t],
     )
+elif mode.startswith("6"):
+    preset_label = st.sidebar.selectbox("Okres", list(PRESETS.keys()), key="m6_preset")
+    preset_id = PRESETS[preset_label]
+    sources_sel = st.sidebar.multiselect(
+        "Źródła",
+        ["web", "discover", "news"],
+        default=["web", "discover", "news"],
+        format_func=lambda t: app.SOURCE_LABELS[t],
+        key="m6_src",
+    )
 elif mode.startswith("5"):
     single_site = st.sidebar.selectbox(
         "Serwis", site_keys, format_func=lambda k: sites[k].name, key="m5_site"
@@ -131,9 +142,11 @@ elif mode.startswith("5"):
 
 today = date.today()
 
+# Tryby 4 i 6 korzystają z presetów dat; własne daty tylko przy presecie 7.
+_preset_mode = mode.startswith("4") or mode.startswith("6")
 # Kalendarze pokazujemy tam, gdzie są używane. W trybie 5 "Previous" tylko przy
 # włączonym porównaniu – inaczej wystarczy jeden okres (start–koniec).
-_need_current = (not mode.startswith("4")) or (preset_id == 7)
+_need_current = (not _preset_mode) or (preset_id == 7)
 _need_previous = _need_current and not (mode.startswith("5") and not compare_urls)
 cur_start = cur_end = prev_start = prev_end = None
 if _need_current:
@@ -156,7 +169,7 @@ if _need_current:
         st.sidebar.caption(f"Wybrano — okres: {_cd} dni")
         if cur_start > cur_end:
             st.sidebar.error("Data startowa jest późniejsza niż końcowa.")
-elif mode.startswith("4"):
+elif _preset_mode:
     _c, _p = app._compute_preset_periods(preset_id)
     _cd = (date.fromisoformat(_c.end) - date.fromisoformat(_c.start)).days + 1
     _pd = (date.fromisoformat(_p.end) - date.fromisoformat(_p.start)).days + 1
@@ -467,6 +480,139 @@ def _render_mode4(bundle):
             _dl(tree, f"{t}_category_tree.csv")
 
 
+GROUP_DISPLAY_COLS = [
+    "site_name",
+    "status",
+    "current_clicks",
+    "previous_clicks",
+    "clicks_change",
+    "clicks_change_pct",
+    "current_impressions",
+    "previous_impressions",
+    "impressions_change_pct",
+]
+
+
+def _compute_group(preset, sources_types):
+    """Pobiera pełną analizę wszystkich serwisów dla wybranego okresu i źródeł."""
+    if not sources_types:
+        st.info("Wybierz co najmniej jedno źródło (Search/Discover/News).")
+        return None
+    if preset == 7:
+        if not _check_periods():
+            return None
+        current, previous = _period(cur_start, cur_end), _period(prev_start, prev_end)
+    else:
+        current, previous = app._compute_preset_periods(preset)
+
+    group_results = []
+    total = len(site_keys)
+    progress = st.progress(0.0, text="Pobieram dane serwisów…")
+    for i, key in enumerate(site_keys):
+        s = sites[key]
+        progress.progress(i / total, text=f"Analizuję {s.name}… ({i + 1}/{total})")
+        try:
+            results = analyze_site_multi_source(
+                s, current, previous, global_config.google_credentials_path,
+                sources_types, use_cache,
+            )
+            has_data = any(
+                not results[t].pages.empty for t in sources_types if t in results
+            )
+            group_results.append({
+                "site_key": key,
+                "site_name": s.name,
+                "results": results,
+                "status": "ok" if has_data else "no_data",
+                "error": None,
+            })
+        except (GSCError, SitemapError) as exc:
+            group_results.append({
+                "site_key": key,
+                "site_name": s.name,
+                "results": {},
+                "status": "error",
+                "error": str(exc),
+            })
+    progress.progress(1.0, text="Gotowe.")
+    progress.empty()
+    return {
+        "current": current,
+        "previous": previous,
+        "sources": list(sources_types),
+        "group_results": group_results,
+    }
+
+
+def _render_group(bundle):
+    current, previous = bundle["current"], bundle["previous"]
+    sources_types = bundle["sources"]
+    group_results = bundle["group_results"]
+    cd = (date.fromisoformat(current.end) - date.fromisoformat(current.start)).days + 1
+    pd_ = (date.fromisoformat(previous.end) - date.fromisoformat(previous.start)).days + 1
+    labels_src = ", ".join(app.SOURCE_LABELS[t] for t in sources_types)
+    st.info(
+        f"**Grupa: {len(group_results)} serwisów** — źródła: {labels_src}\n\n"
+        f"CURRENT {current.start}…{current.end} ({cd} dni)  vs  "
+        f"PREVIOUS {previous.start}…{previous.end} ({pd_} dni)"
+    )
+
+    for entry in group_results:
+        if entry["status"] == "error":
+            st.warning(f"[BŁĄD] {entry['site_name']}: {entry['error']}")
+        elif entry["status"] == "no_data":
+            st.caption(f"ℹ️ {entry['site_name']}: brak danych dla wybranego okresu/źródeł.")
+
+    overview = app._group_overview_df(group_results, sources_types)
+    if overview.empty:
+        st.error("Brak danych do pokazania.")
+        return
+
+    tot_cur = float(overview["current_clicks"].sum())
+    tot_prev = float(overview["previous_clicks"].sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Grupa — Current clicks", f"{int(tot_cur):,}".replace(",", " "))
+    c2.metric("Grupa — Previous clicks", f"{int(tot_prev):,}".replace(",", " "))
+    c3.metric("Zmiana", f"{int(tot_cur - tot_prev):+,}".replace(",", " "))
+
+    st.subheader("Przegląd grupy — zmiana ruchu per serwis")
+    st.caption("Sortowanie: największe spadki na górze. Kolumny można klikać, by sortować.")
+    st.dataframe(overview[GROUP_DISPLAY_COLS], use_container_width=True, hide_index=True)
+    _dl(overview, "group_overview.csv")
+
+    ranked = overview[overview["status"] == "ok"]
+    if not ranked.empty:
+        st.subheader("Zmiana klików per serwis")
+        st.bar_chart(ranked.set_index("site_name")["clicks_change"])
+
+    daily = app._group_daily_by_date_df(group_results, sources_types)
+    if not daily.empty:
+        st.subheader("Ruch dzienny — wszystkie serwisy (okres bieżący)")
+        st.caption("Oś X = kalendarzowa data okresu bieżącego; jedna linia na serwis.")
+        st.line_chart(daily)
+
+    st.subheader("Szczegóły serwisu (wykres + kategorie zysk/strata)")
+    ok_entries = [e for e in group_results if e["status"] != "error"]
+    if not ok_entries:
+        st.info("Brak serwisów z danymi do szczegółowej analizy.")
+        return
+    labels = {e["site_key"]: e["site_name"] for e in ok_entries}
+    chosen = st.selectbox(
+        "Wybierz serwis", list(labels.keys()),
+        format_func=lambda k: labels[k], key="m6_drill",
+    )
+    entry = next(e for e in ok_entries if e["site_key"] == chosen)
+    drill_bundle = {
+        "site_key": entry["site_key"],
+        "site_name": entry["site_name"],
+        "current": current,
+        "previous": previous,
+        "sources": [t for t in sources_types if t in entry["results"]],
+        "results": entry["results"],
+    }
+    _render_mode4(drill_bundle)
+
+
 def _parse_urls(pasted, uploaded):
     text = pasted or ""
     if uploaded is not None:
@@ -635,10 +781,20 @@ MODE_DESCRIPTIONS = {
         "➡️ Wybierz **serwis** i **źródła**, ustaw okres (lub zaznacz „Porównaj dwa "
         "okresy”), wklej/wgraj URL-e, kliknij **Uruchom analizę**."
     ),
+    "6": (
+        "**Tryb 6 — Grupa: przegląd wszystkich serwisów.** Pobiera naraz wszystkie "
+        "serwisy z grupy i pokazuje zbiorczy obraz: tabelę zmian klików/wyświetleń "
+        "per serwis (kto rośnie, kto traci), słupki zmiany oraz wielolinowy wykres "
+        "dzienny (oś X = data) dla wszystkich domen. Po wybraniu serwisu wchodzisz w "
+        "jego szczegóły: wykres dzień po dniu i kategorie, które zyskują/tracą.\n\n"
+        "➡️ Wybierz **okres** (preset albo Własne daty) i **źródła**, kliknij "
+        "**Uruchom analizę**. Pierwsze pobranie jest wolniejsze (7 serwisów), kolejne "
+        "idą z cache."
+    ),
 }
 
 with st.expander("ℹ️ Jak używać — opis wszystkich trybów", expanded=False):
-    for _key in ("1", "2", "3", "4", "5"):
+    for _key in ("1", "2", "3", "4", "5", "6"):
         st.markdown(MODE_DESCRIPTIONS[_key])
         st.markdown("---")
 
@@ -653,6 +809,16 @@ if mode.startswith("4"):
     saved = st.session_state.get("m4_bundle")
     if saved:
         _render_mode4(saved)
+    else:
+        st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
+elif mode.startswith("6"):
+    if run:
+        bundle = _compute_group(preset_id, sources_sel)
+        if bundle is not None:
+            st.session_state["m6_bundle"] = bundle
+    saved = st.session_state.get("m6_bundle")
+    if saved:
+        _render_group(saved)
     else:
         st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
 elif mode.startswith("5"):

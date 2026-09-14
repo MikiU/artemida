@@ -148,6 +148,7 @@ class SourceAnalysis:
     current_clicks: float
     previous_clicks: float
     daily: pd.DataFrame = field(default_factory=pd.DataFrame)  # day, Current, Previous
+    daily_current: pd.DataFrame = field(default_factory=pd.DataFrame)  # date, clicks (okres bieżący)
 
 
 @dataclass
@@ -204,6 +205,15 @@ def _daily_series(
         if col not in merged.columns:
             merged[col] = 0
     return merged.fillna(0).reset_index(drop=True)
+
+
+def _daily_by_date(current_df: pd.DataFrame) -> pd.DataFrame:
+    """Zwraca dzienny ruch okresu bieżącego wg kalendarzowej daty: kolumny date, clicks."""
+    if current_df.empty or "date" not in current_df.columns:
+        return pd.DataFrame({"date": [], "clicks": []})
+    return (
+        current_df.groupby("date", as_index=False)["clicks"].sum().sort_values("date").reset_index(drop=True)
+    )
 
 
 def analyze_source(
@@ -292,8 +302,10 @@ def analyze_source(
             use_cache=use_cache,
         )
         daily = _daily_series(current_daily, previous_daily)
+        daily_current = _daily_by_date(current_daily)
     else:
         daily = pd.DataFrame()
+        daily_current = pd.DataFrame()
 
     return SourceAnalysis(
         search_type=search_type,
@@ -303,6 +315,7 @@ def analyze_source(
         current_clicks=float(pages["current_clicks"].sum()),
         previous_clicks=float(pages["previous_clicks"].sum()),
         daily=daily,
+        daily_current=daily_current,
     )
 
 

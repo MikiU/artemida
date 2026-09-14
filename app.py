@@ -1303,7 +1303,89 @@ def _combined_source_categories_df(sources: list[SiteSources]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def _source_overview_df(sources: list[SiteSources]) -> pd.DataFrame:
+GROUP_OVERVIEW_COLUMNS = [
+    "site_key",
+    "site_name",
+    "status",
+    "current_clicks",
+    "previous_clicks",
+    "clicks_change",
+    "clicks_change_pct",
+    "current_impressions",
+    "previous_impressions",
+    "impressions_change",
+    "impressions_change_pct",
+]
+
+
+def _group_overview_df(
+    group_results: list[dict], sources: list[str]
+) -> pd.DataFrame:
+    """Zbiorcza tabela grupy: sumy clicks/impressions po wybranych źródłach per serwis.
+
+    `group_results` to lista wpisów {site_key, site_name, results, status, error?},
+    gdzie `results` to mapa search_type -> SourceAnalysis.
+    """
+    rows = []
+    for entry in group_results:
+        results = entry.get("results") or {}
+        current = previous = current_impr = previous_impr = 0.0
+        for search_type in sources:
+            analysis = results.get(search_type)
+            if analysis is None:
+                continue
+            current += analysis.current_clicks
+            previous += analysis.previous_clicks
+            pages = analysis.pages
+            if not pages.empty:
+                current_impr += float(pages["current_impressions"].sum())
+                previous_impr += float(pages["previous_impressions"].sum())
+        rows.append(
+            {
+                "site_key": entry["site_key"],
+                "site_name": entry["site_name"],
+                "status": entry.get("status", "ok"),
+                "current_clicks": current,
+                "previous_clicks": previous,
+                "clicks_change": current - previous,
+                "clicks_change_pct": _pct(current, previous),
+                "current_impressions": current_impr,
+                "previous_impressions": previous_impr,
+                "impressions_change": current_impr - previous_impr,
+                "impressions_change_pct": _pct(current_impr, previous_impr),
+            }
+        )
+    df = pd.DataFrame(rows, columns=GROUP_OVERVIEW_COLUMNS)
+    if df.empty:
+        return df
+    return df.sort_values("clicks_change", ascending=True).reset_index(drop=True)
+
+
+def _group_daily_by_date_df(
+    group_results: list[dict], sources: list[str]
+) -> pd.DataFrame:
+    """Szeroki DataFrame ruchu dziennego okresu bieżącego: indeks=data, kolumny=serwisy.
+
+    Sumuje `daily_current` po wybranych źródłach; brakujące dni wyrównuje do 0.
+    """
+    series_by_site: dict[str, pd.Series] = {}
+    for entry in group_results:
+        results = entry.get("results") or {}
+        combined = None
+        for search_type in sources:
+            analysis = results.get(search_type)
+            if analysis is None or analysis.daily_current.empty:
+                continue
+            daily = analysis.daily_current.set_index("date")["clicks"]
+            combined = daily if combined is None else combined.add(daily, fill_value=0)
+        if combined is not None and not combined.empty:
+            series_by_site[entry["site_name"]] = combined
+    if not series_by_site:
+        return pd.DataFrame()
+    df = pd.DataFrame(series_by_site).sort_index().fillna(0)
+    df.index.name = "date"
+    return df
+
     rows = []
     for site in sources:
         for search_type, analysis in _iter_sources(site):
