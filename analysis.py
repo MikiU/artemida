@@ -249,30 +249,44 @@ def analyze_branded_search(
     if not query_filter:
         return pd.DataFrame(columns=["day", "Current", "Previous"])
 
-    current = get_gsc_data(
-        current_period.start,
-        current_period.end,
-        site_config.gsc_property,
-        credentials_path,
-        dimensions=("date",),
-        search_type="web",
-        use_cache=use_cache,
-        query_filter=query_filter,
-    )
-    previous = get_gsc_data(
-        previous_period.start,
-        previous_period.end,
-        site_config.gsc_property,
-        credentials_path,
-        dimensions=("date",),
-        search_type="web",
-        use_cache=use_cache,
-        query_filter=query_filter,
-    )
+    current = _branded_daily_data(site_config, current_period, credentials_path, use_cache)
+    previous = _branded_daily_data(site_config, previous_period, credentials_path, use_cache)
     return _daily_series(
-        _complete_daily_period(current, current_period),
-        _complete_daily_period(previous, previous_period),
+        current,
+        previous,
     )
+
+
+def _branded_daily_data(
+    site_config: SiteConfig,
+    period: Period,
+    credentials_path: str,
+    use_cache: bool,
+) -> pd.DataFrame:
+    query_filter = _brand_query_regex(site_config.brand_terms)
+    if not query_filter:
+        return _complete_daily_period(pd.DataFrame(), period)
+    data = get_gsc_data(
+        period.start,
+        period.end,
+        site_config.gsc_property,
+        credentials_path,
+        dimensions=("date",),
+        search_type="web",
+        use_cache=use_cache,
+        query_filter=query_filter,
+    )
+    return _complete_daily_period(data, period)
+
+
+def analyze_branded_search_period(
+    site_config: SiteConfig,
+    period: Period,
+    credentials_path: str,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Returns daily branded Search clicks for one calendar date range."""
+    return _branded_daily_data(site_config, period, credentials_path, use_cache)
 
 
 def analyze_source(

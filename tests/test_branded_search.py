@@ -3,7 +3,12 @@ from unittest.mock import Mock
 import pandas as pd
 
 import analysis as analysis_module
-from analysis import Period, _brand_query_regex, analyze_branded_search
+from analysis import (
+    Period,
+    _brand_query_regex,
+    analyze_branded_search,
+    analyze_branded_search_period,
+)
 from config import SiteConfig
 from services import gsc_service
 
@@ -82,3 +87,24 @@ def test_analyze_branded_search_returns_aligned_daily_series(monkeypatch):
     assert len(calls) == 2
     assert all(call["search_type"] == "web" for call in calls)
     assert all(call["query_filter"] == r"(?i).*(?:fakt).*" for call in calls)
+
+
+def test_analyze_branded_search_period_fills_missing_dates(monkeypatch):
+    site = SiteConfig(
+        "fakt", "Fakt", "https://www.fakt.pl/", "https://www.fakt.pl/", [],
+        brand_terms=["fakt"],
+    )
+    monkeypatch.setattr(
+        analysis_module,
+        "get_gsc_data",
+        lambda *args, **kwargs: pd.DataFrame(
+            {"date": ["2026-07-01", "2026-07-03"], "clicks": [8, 5]}
+        ),
+    )
+
+    result = analyze_branded_search_period(
+        site, Period("2026-07-01", "2026-07-03"), "credentials"
+    )
+
+    assert list(result["date"]) == ["2026-07-01", "2026-07-02", "2026-07-03"]
+    assert list(result["clicks"]) == [8, 0, 5]

@@ -12,6 +12,7 @@ import io
 import os
 import re
 import zipfile
+from calendar import monthrange
 from datetime import date, timedelta
 
 import streamlit as st
@@ -21,6 +22,7 @@ from analysis import (
     Period,
     analyze_site,
     analyze_branded_search,
+    analyze_branded_search_period,
     analyze_site_multi_source,
     analyze_site_sources,
     build_url_metrics,
@@ -102,6 +104,15 @@ PRESETS = {
     "Własne daty": 7,
 }
 
+
+def _months_before(day: date, months: int) -> date:
+    month_index = day.year * 12 + day.month - 1 - months
+    year, month_zero_based = divmod(month_index, 12)
+    month = month_zero_based + 1
+    return date(year, month, min(day.day, monthrange(year, month)[1]))
+
+
+today = date.today()
 single_site = None
 preset_id = 7
 sources_sel: list[str] = []
@@ -131,17 +142,33 @@ elif mode.startswith("6"):
     )
 elif mode.startswith("7"):
     brand_site_keys = [key for key in site_keys if sites[key].brand_terms]
-    if brand_site_keys:
-        single_site = st.sidebar.selectbox(
-            "Serwis z konfiguracją brandów",
-            brand_site_keys,
-            format_func=lambda k: sites[k].name,
-            key="m7_site",
-        )
-    preset_label = st.sidebar.selectbox(
-        "Okres", list(PRESETS.keys()), key="m7_preset_label"
+    m7_period_mode = st.sidebar.radio(
+        "Zakres analizy",
+        ["Zakres dat", "Porównanie okresów", "Pełna dostępna historia"],
+        key="m7_period_mode",
     )
-    preset_id = PRESETS[preset_label]
+    if m7_period_mode == "Zakres dat":
+        m7_start = st.sidebar.date_input(
+            "Data początkowa", today - timedelta(days=31), key="m7_start"
+        )
+        m7_end = st.sidebar.date_input(
+            "Data końcowa", today - timedelta(days=3), key="m7_end"
+        )
+    elif m7_period_mode == "Porównanie okresów":
+        m7_current_start = st.sidebar.date_input(
+            "Current — od", today - timedelta(days=31), key="m7_current_start"
+        )
+        m7_current_end = st.sidebar.date_input(
+            "Current — do", today - timedelta(days=3), key="m7_current_end"
+        )
+        m7_previous_start = st.sidebar.date_input(
+            "Previous — od", today - timedelta(days=62), key="m7_previous_start"
+        )
+        m7_previous_end = st.sidebar.date_input(
+            "Previous — do", today - timedelta(days=34), key="m7_previous_end"
+        )
+    else:
+        st.sidebar.caption("Pobierze maksymalnie około 16 miesięcy danych do dnia sprzed 3 dni.")
 elif mode.startswith("5"):
     single_site = st.sidebar.selectbox(
         "Serwis", site_keys, format_func=lambda k: sites[k].name, key="m5_site"
@@ -155,13 +182,11 @@ elif mode.startswith("5"):
     )
     compare_urls = st.sidebar.checkbox("Porównaj dwa okresy", value=False)
 
-today = date.today()
-
 # Tryby 4 i 6 korzystają z presetów dat; własne daty tylko przy presecie 7.
 _preset_mode = mode.startswith("4") or mode.startswith("6") or mode.startswith("7")
 # Kalendarze pokazujemy tam, gdzie są używane. W trybie 5 "Previous" tylko przy
 # włączonym porównaniu – inaczej wystarczy jeden okres (start–koniec).
-_need_current = (not _preset_mode) or (preset_id == 7)
+_need_current = (not _preset_mode) or (preset_id == 7 and not mode.startswith("7"))
 _need_previous = _need_current and not (mode.startswith("5") and not compare_urls)
 cur_start = cur_end = prev_start = prev_end = None
 if _need_current:
@@ -761,51 +786,84 @@ def render_mode5():
 
 
 def render_mode7():
-    if single_site is None:
+    brand_site_keys = [key for key in site_keys if sites[key].brand_terms]
+    if not brand_site_keys:
         st.warning("Brak serwisów z skonfigurowanymi frazami brandowymi.")
         return
-    site = sites[single_site]
     st.caption(
         "Analiza korzysta wyłącznie z danych Google Search (web), ponieważ tylko "
         "dla tego źródła dostępne są dane o zapytaniach i słowach kluczowych."
     )
     if run:
-        if preset_id == 7:
-            if not _check_periods():
+        if m7_period_mode == "Zakres dat":
+            if m7_start > m7_end:
+                st.error("Data początkowa jest późniejsza niż końcowa.")
                 return
-            current, previous = _period(cur_start, cur_end), _period(prev_start, prev_end)
+            period = _period(m7_start, m7_end)
+            periods = {key: (period, None) for key in brand_site_keys}
+        elif m7_period_mode == "Porównanie okresów":
+            if m7_current_start > m7_current_end or m7_previous_start > m7_previous_end:
+                st.error("Data początkowa nie może być późniejsza niż końcowa.")
+                return
+            current = _period(m7_current_start, m7_current_end)
+            previous = _period(m7_previous_start, m7_previous_end)
+            periods = {key: (current, previous) for key in brand_site_keys}
         else:
-            current, previous = app._compute_preset_periods(preset_id)
-        try:
-            with st.spinner(f"Pobieram branded search dla {site.name}…"):
-                daily = analyze_branded_search(
-                    site,
-                    current,
-                    previous,
-                    global_config.google_credentials_path,
-                    use_cache,
-                )
-        except GSCError as exc:
-            st.error(f"{site.name}: {exc}")
-            return
-        st.session_state["m7_result"] = {
-            "site_key": single_site,
-            "current": current,
-            "previous": previous,
-            "daily": daily,
-        }
+            latest = date.today() - timedelta(days=3)
+            earliest = _months_before(latest, 16)
+            period = Period(earliest.isoformat(), latest.isoformat())
+            periods = {key: (period, None) for key in brand_site_keys}
 
-    result = st.session_state.get("m7_result")
-    if not result or result["site_key"] != single_site:
-        st.info("Ustaw serwis i okres, a następnie kliknij **Uruchom analizę**.")
+        results = {}
+        for key in brand_site_keys:
+            site = sites[key]
+            current, previous = periods[key]
+            try:
+                with st.spinner(f"Pobieram branded search dla {site.name}…"):
+                    if previous is None:
+                        daily = analyze_branded_search_period(
+                            site,
+                            current,
+                            global_config.google_credentials_path,
+                            use_cache,
+                        )
+                    else:
+                        daily = analyze_branded_search(
+                            site,
+                            current,
+                            previous,
+                            global_config.google_credentials_path,
+                            use_cache,
+                        )
+            except GSCError as exc:
+                st.warning(f"{site.name}: {exc}")
+                continue
+            results[key] = {
+                "current": current,
+                "previous": previous,
+                "daily": daily,
+            }
+        st.session_state["m7_results"] = results
+        st.session_state["m7_period_mode"] = m7_period_mode
+
+    results = st.session_state.get("m7_results")
+    if not results or st.session_state.get("m7_period_mode") != m7_period_mode:
+        st.info("Ustaw zakres analizy i kliknij **Uruchom analizę**.")
         return
-    current, previous = result["current"], result["previous"]
-    st.subheader(
-        f"{site.name} — branded search ({current.start}–{current.end} vs "
-        f"{previous.start}–{previous.end})"
-    )
-    st.caption("Frazy: " + ", ".join(site.brand_terms))
-    st.line_chart(result["daily"].set_index("day")[["Current", "Previous"]])
+    for key, result in results.items():
+        site = sites[key]
+        current, previous = result["current"], result["previous"]
+        if previous is None:
+            chart = result["daily"].set_index("date")[["clicks"]]
+            period_label = f"{current.start}–{current.end}"
+        else:
+            chart = result["daily"].set_index("day")[["Current", "Previous"]]
+            period_label = (
+                f"{current.start}–{current.end} vs {previous.start}–{previous.end}"
+            )
+        st.subheader(f"{site.name} — branded search ({period_label})")
+        st.caption("Frazy: " + ", ".join(site.brand_terms))
+        st.line_chart(chart)
 
 
 MODE_DESCRIPTIONS = {
@@ -855,10 +913,11 @@ MODE_DESCRIPTIONS = {
         "idą z cache."
     ),
     "7": (
-        "**Tryb 7 — Branded search.** Dzienny wykres kliknięć z zapytań zawierających "
-        "skonfigurowane frazy brandowe, porównujący bieżący i poprzedni okres. "
-        "To wyłącznie dane Google Search (web), ponieważ tylko tam dostępne są "
-        "zapytania i słowa kluczowe."
+        "**Tryb 7 — Branded search.** Analizuje wszystkie serwisy z konfiguracją "
+        "brandów. Wybierz jeden zakres dat, porównanie dwóch okresów albo pełną "
+        "dostępną historię (do około 16 miesięcy). Dla każdego serwisu pokazuje "
+        "dzienny wykres kliknięć z fraz brandowych. Są to wyłącznie dane Search "
+        "(web), bo tylko tam dostępne są zapytania i słowa kluczowe."
     ),
 }
 

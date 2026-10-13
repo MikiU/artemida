@@ -281,8 +281,10 @@ streamlit run dashboard.py
 
 Otworzy się w przeglądarce (np. `http://localhost:8501`). W panelu po lewej
 wybierasz tryb, serwis i okres, a następnie klikasz **Uruchom analizę**. **Tryb 7**
-pokazuje jeden dzienny wykres branded search dla fraz `brand_terms` z `sites.yaml`;
-to wyłącznie dane Search (web), ponieważ tylko dla tego źródła GSC udostępnia
+pokazuje branded search dla wszystkich serwisów z `brand_terms` w `sites.yaml`.
+Można wybrać własny zakres dat, porównać dwa okresy albo pobrać pełną dostępną
+historię (maksymalnie 16 miesięcy). Każdy serwis ma osobny dzienny wykres.
+To wyłącznie dane Search (web), ponieważ tylko dla tego źródła GSC udostępnia
 zapytania.
 CLI (`python app.py`) działa dalej niezależnie.
 
