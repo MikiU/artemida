@@ -424,6 +424,8 @@ def _mode4_zip(bundle) -> bytes:
             zf.writestr(f"{source_type}_pages.csv", sa.pages.to_csv(index=False))
             if not sa.daily.empty:
                 zf.writestr(f"{source_type}_daily.csv", sa.daily.to_csv(index=False))
+            if not sa.brand_daily.empty:
+                zf.writestr(f"{source_type}_branded_daily.csv", sa.brand_daily.to_csv(index=False))
     return buffer.getvalue()
 
 
@@ -463,6 +465,17 @@ def _render_mode4(bundle):
                 st.subheader("Ruch dzień po dniu (Current vs Previous)")
                 st.line_chart(sa.daily.set_index("day")[["Current", "Previous"]])
                 st.caption("Dzień 1 = początek okresu; linie nałożone dla porównania.")
+            if sa.brand_terms:
+                branded_current = float(sa.brand_daily["Current"].sum())
+                branded_previous = float(sa.brand_daily["Previous"].sum())
+                st.subheader("Branded search")
+                st.metric(
+                    "Kliknięcia brandowe",
+                    f"{branded_current:,.0f}".replace(",", " "),
+                    delta=f"{branded_current - branded_previous:+,.0f}".replace(",", " "),
+                )
+                st.caption("Frazy: " + ", ".join(sa.brand_terms))
+                st.line_chart(sa.brand_daily.set_index("day")[["Current", "Previous"]])
             tree = sa.tree
             if tree.empty:
                 st.write("(brak danych kategorii)")

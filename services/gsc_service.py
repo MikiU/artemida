@@ -57,12 +57,15 @@ def _cache_path(
     end_date: str,
     dimensions: list[str],
     search_type: str,
+    query_filter: str | None = None,
 ) -> str:
     """Ścieżka pliku cache – klucz uwzględnia property, daty, wymiary i typ."""
     key = f"{gsc_property}|{start_date}|{end_date}|{','.join(dimensions)}"
     # Zachowaj zgodność ze starym cache dla web (bez typu w kluczu).
     if search_type != "web":
         key += f"|{search_type}"
+    if query_filter:
+        key += f"|query_filter:{query_filter}"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return os.path.join(CACHE_DIR, f"{digest}.csv")
 
@@ -75,6 +78,7 @@ def get_gsc_data(
     dimensions: tuple[str, ...] = ("page",),
     search_type: str = "web",
     use_cache: bool = True,
+    query_filter: str | None = None,
 ) -> pd.DataFrame:
     """Pobiera dane Search Analytics dla podanych wymiarów i typu danych.
 
@@ -86,7 +90,9 @@ def get_gsc_data(
     """
     dims = list(dimensions)
     columns = dims + ["clicks", "impressions", "ctr", "position"]
-    cache_file = _cache_path(gsc_property, start_date, end_date, dims, search_type)
+    cache_file = _cache_path(
+        gsc_property, start_date, end_date, dims, search_type, query_filter
+    )
     if use_cache and os.path.exists(cache_file):
         print(f"Cache hit: {gsc_property} {start_date}..{end_date} [{search_type}]")
         dtype = {dim: str for dim in dims}
@@ -107,6 +113,14 @@ def get_gsc_data(
             "rowLimit": ROW_LIMIT,
             "startRow": start_row,
         }
+        if query_filter:
+            request_body["dimensionFilterGroups"] = [{
+                "filters": [{
+                    "dimension": "query",
+                    "operator": "includingRegex",
+                    "expression": query_filter,
+                }]
+            }]
 
         try:
             response = (

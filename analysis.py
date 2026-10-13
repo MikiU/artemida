@@ -6,6 +6,7 @@ Pipeline jest identyczny jak w analizie jednodomenowej (Etap 1/1.5).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -149,6 +150,8 @@ class SourceAnalysis:
     previous_clicks: float
     daily: pd.DataFrame = field(default_factory=pd.DataFrame)  # day, Current, Previous
     daily_current: pd.DataFrame = field(default_factory=pd.DataFrame)  # date, clicks (okres bieżący)
+    brand_terms: list[str] = field(default_factory=list)
+    brand_daily: pd.DataFrame = field(default_factory=pd.DataFrame)  # day, Current, Previous
 
 
 @dataclass
@@ -213,6 +216,26 @@ def _daily_by_date(current_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame({"date": [], "clicks": []})
     return (
         current_df.groupby("date", as_index=False)["clicks"].sum().sort_values("date").reset_index(drop=True)
+    )
+
+
+def _brand_query_regex(terms: list[str]) -> str | None:
+    """Buduje RE2 z literalnych fraz brandowych; dopasowanie jest substringiem."""
+    escaped = [re.escape(term.strip()).replace(r"\ ", " ") for term in terms if term.strip()]
+    return f"(?i).*(?:{'|'.join(escaped)}).*" if escaped else None
+
+
+def _complete_daily_period(df: pd.DataFrame, period: Period) -> pd.DataFrame:
+    """Uzupełnia brakujące daty zerami, co jest istotne dla filtrowanych zapytań."""
+    dates = pd.date_range(period.start, period.end, freq="D").strftime("%Y-%m-%d")
+    if df.empty or "date" not in df.columns:
+        return pd.DataFrame({"date": dates, "clicks": 0.0})
+    daily = df.groupby("date")["clicks"].sum()
+    return (
+        daily.reindex(dates, fill_value=0)
+        .rename("clicks")
+        .rename_axis("date")
+        .reset_index()
     )
 
 
@@ -303,9 +326,40 @@ def analyze_source(
         )
         daily = _daily_series(current_daily, previous_daily)
         daily_current = _daily_by_date(current_daily)
+        brand_terms = site_config.brand_terms if search_type == "web" else []
+        brand_regex = _brand_query_regex(brand_terms)
+        if brand_regex:
+            current_brand = get_gsc_data(
+                current_period.start,
+                current_period.end,
+                site_config.gsc_property,
+                credentials_path,
+                dimensions=("date",),
+                search_type=search_type,
+                use_cache=use_cache,
+                query_filter=brand_regex,
+            )
+            previous_brand = get_gsc_data(
+                previous_period.start,
+                previous_period.end,
+                site_config.gsc_property,
+                credentials_path,
+                dimensions=("date",),
+                search_type=search_type,
+                use_cache=use_cache,
+                query_filter=brand_regex,
+            )
+            brand_daily = _daily_series(
+                _complete_daily_period(current_brand, current_period),
+                _complete_daily_period(previous_brand, previous_period),
+            )
+        else:
+            brand_daily = pd.DataFrame()
     else:
         daily = pd.DataFrame()
         daily_current = pd.DataFrame()
+        brand_terms = []
+        brand_daily = pd.DataFrame()
 
     return SourceAnalysis(
         search_type=search_type,
@@ -316,6 +370,8 @@ def analyze_source(
         previous_clicks=float(pages["previous_clicks"].sum()),
         daily=daily,
         daily_current=daily_current,
+        brand_terms=brand_terms,
+        brand_daily=brand_daily,
     )
 
 

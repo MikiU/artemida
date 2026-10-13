@@ -148,6 +148,18 @@ sites:
 - `gsc_property` – dokładnie jak w Search Console:
   - URL-prefix property: `https://wiadomosci.onet.pl/`
   - Domain property: `sc-domain:onet.pl`
+- `brand_terms` (opcjonalne) – frazy brandowe liczone w raporcie Search trybu 4:
+  dopasowywane jako fragmenty zapytania, bez względu na wielkość liter. Warto
+  podać warianty z polskimi znakami i bez nich osobno. Przykład:
+
+```yaml
+    brand_terms:
+      - "Onet"
+      - "Onet wiadomości"
+```
+
+  GSC może ukrywać część zapytań i nie gwarantuje zwrócenia wszystkich wierszy,
+  dlatego kliknięcia brandowe mogą nie sumować się do całkowitego ruchu Search.
 - Konto serwisowe musi być dodane jako użytkownik **każdej** property (krok 2.5).
 
 **Grupy kategorii (opcjonalnie)** – ręczne dopasowanie kategorii między

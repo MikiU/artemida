@@ -32,6 +32,7 @@ class SiteConfig:
     ymyl_paths: list[str] = field(default_factory=list)
     # Ścieżki wykluczone z YMYL mimo dopasowania do ymyl_paths (np. Pogoda).
     ymyl_exclude_paths: list[str] = field(default_factory=list)
+    brand_terms: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -133,6 +134,9 @@ def load_sites(path: str = "sites.yaml") -> SitesConfig:
             ymyl_exclude = global_ymyl_exclude
         elif isinstance(ymyl_exclude, str):
             ymyl_exclude = [ymyl_exclude]
+        brand_terms = cfg.get("brand_terms") or []
+        if isinstance(brand_terms, str):
+            brand_terms = [brand_terms]
         sites[key] = SiteConfig(
             key=key,
             name=str(cfg["name"]),
@@ -141,6 +145,7 @@ def load_sites(path: str = "sites.yaml") -> SitesConfig:
             category_sitemaps=[str(s) for s in sitemaps],
             ymyl_paths=[str(p) for p in ymyl],
             ymyl_exclude_paths=[str(p) for p in ymyl_exclude],
+            brand_terms=[str(term).strip() for term in brand_terms if str(term).strip()],
         )
 
     category_groups = _parse_category_groups(raw.get("category_groups"), sites)

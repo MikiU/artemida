@@ -1,7 +1,7 @@
 """Test nakładania dziennego szeregu czasowego (Current vs Previous)."""
 import pandas as pd
 
-from analysis import _daily_series
+from analysis import Period, _complete_daily_period, _daily_series
 
 
 def _daily(dates, clicks):
@@ -32,3 +32,10 @@ def test_daily_series_handles_missing_period():
     result = _daily_series(cur, prev)
     assert list(result["Current"]) == [10, 20]
     assert list(result["Previous"]) == [0, 0]
+
+
+def test_complete_daily_period_keeps_zero_click_days_in_place():
+    data = _daily(["2026-07-01", "2026-07-03"], [8, 5])
+    result = _complete_daily_period(data, Period("2026-07-01", "2026-07-03"))
+    assert list(result["date"]) == ["2026-07-01", "2026-07-02", "2026-07-03"]
+    assert list(result["clicks"]) == [8, 0, 5]
