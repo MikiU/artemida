@@ -150,8 +150,6 @@ class SourceAnalysis:
     previous_clicks: float
     daily: pd.DataFrame = field(default_factory=pd.DataFrame)  # day, Current, Previous
     daily_current: pd.DataFrame = field(default_factory=pd.DataFrame)  # date, clicks (okres bieżący)
-    brand_terms: list[str] = field(default_factory=list)
-    brand_daily: pd.DataFrame = field(default_factory=pd.DataFrame)  # day, Current, Previous
 
 
 @dataclass
@@ -236,6 +234,44 @@ def _complete_daily_period(df: pd.DataFrame, period: Period) -> pd.DataFrame:
         .rename("clicks")
         .rename_axis("date")
         .reset_index()
+    )
+
+
+def analyze_branded_search(
+    site_config: SiteConfig,
+    current_period: Period,
+    previous_period: Period,
+    credentials_path: str,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Returns daily Search clicks for configured brand queries, aligned by day."""
+    query_filter = _brand_query_regex(site_config.brand_terms)
+    if not query_filter:
+        return pd.DataFrame(columns=["day", "Current", "Previous"])
+
+    current = get_gsc_data(
+        current_period.start,
+        current_period.end,
+        site_config.gsc_property,
+        credentials_path,
+        dimensions=("date",),
+        search_type="web",
+        use_cache=use_cache,
+        query_filter=query_filter,
+    )
+    previous = get_gsc_data(
+        previous_period.start,
+        previous_period.end,
+        site_config.gsc_property,
+        credentials_path,
+        dimensions=("date",),
+        search_type="web",
+        use_cache=use_cache,
+        query_filter=query_filter,
+    )
+    return _daily_series(
+        _complete_daily_period(current, current_period),
+        _complete_daily_period(previous, previous_period),
     )
 
 
@@ -326,40 +362,9 @@ def analyze_source(
         )
         daily = _daily_series(current_daily, previous_daily)
         daily_current = _daily_by_date(current_daily)
-        brand_terms = site_config.brand_terms if search_type == "web" else []
-        brand_regex = _brand_query_regex(brand_terms)
-        if brand_regex:
-            current_brand = get_gsc_data(
-                current_period.start,
-                current_period.end,
-                site_config.gsc_property,
-                credentials_path,
-                dimensions=("date",),
-                search_type=search_type,
-                use_cache=use_cache,
-                query_filter=brand_regex,
-            )
-            previous_brand = get_gsc_data(
-                previous_period.start,
-                previous_period.end,
-                site_config.gsc_property,
-                credentials_path,
-                dimensions=("date",),
-                search_type=search_type,
-                use_cache=use_cache,
-                query_filter=brand_regex,
-            )
-            brand_daily = _daily_series(
-                _complete_daily_period(current_brand, current_period),
-                _complete_daily_period(previous_brand, previous_period),
-            )
-        else:
-            brand_daily = pd.DataFrame()
     else:
         daily = pd.DataFrame()
         daily_current = pd.DataFrame()
-        brand_terms = []
-        brand_daily = pd.DataFrame()
 
     return SourceAnalysis(
         search_type=search_type,
@@ -370,8 +375,6 @@ def analyze_source(
         previous_clicks=float(pages["previous_clicks"].sum()),
         daily=daily,
         daily_current=daily_current,
-        brand_terms=brand_terms,
-        brand_daily=brand_daily,
     )
 
 

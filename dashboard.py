@@ -20,6 +20,7 @@ import app  # reużycie funkcji budujących DataFrame (bez duplikacji logiki)
 from analysis import (
     Period,
     analyze_site,
+    analyze_branded_search,
     analyze_site_multi_source,
     analyze_site_sources,
     build_url_metrics,
@@ -84,6 +85,7 @@ mode = st.sidebar.radio(
         "4 – Jeden serwis (Search/Discover/News)",
         "5 – Lista URL-i → dane",
         "6 – Grupa: przegląd wszystkich serwisów",
+        "7 – Branded search (Search)",
     ],
 )
 selected = st.sidebar.multiselect(
@@ -127,6 +129,19 @@ elif mode.startswith("6"):
         format_func=lambda t: app.SOURCE_LABELS[t],
         key="m6_src",
     )
+elif mode.startswith("7"):
+    brand_site_keys = [key for key in site_keys if sites[key].brand_terms]
+    if brand_site_keys:
+        single_site = st.sidebar.selectbox(
+            "Serwis z konfiguracją brandów",
+            brand_site_keys,
+            format_func=lambda k: sites[k].name,
+            key="m7_site",
+        )
+    preset_label = st.sidebar.selectbox(
+        "Okres", list(PRESETS.keys()), key="m7_preset_label"
+    )
+    preset_id = PRESETS[preset_label]
 elif mode.startswith("5"):
     single_site = st.sidebar.selectbox(
         "Serwis", site_keys, format_func=lambda k: sites[k].name, key="m5_site"
@@ -143,7 +158,7 @@ elif mode.startswith("5"):
 today = date.today()
 
 # Tryby 4 i 6 korzystają z presetów dat; własne daty tylko przy presecie 7.
-_preset_mode = mode.startswith("4") or mode.startswith("6")
+_preset_mode = mode.startswith("4") or mode.startswith("6") or mode.startswith("7")
 # Kalendarze pokazujemy tam, gdzie są używane. W trybie 5 "Previous" tylko przy
 # włączonym porównaniu – inaczej wystarczy jeden okres (start–koniec).
 _need_current = (not _preset_mode) or (preset_id == 7)
@@ -424,8 +439,6 @@ def _mode4_zip(bundle) -> bytes:
             zf.writestr(f"{source_type}_pages.csv", sa.pages.to_csv(index=False))
             if not sa.daily.empty:
                 zf.writestr(f"{source_type}_daily.csv", sa.daily.to_csv(index=False))
-            if not sa.brand_daily.empty:
-                zf.writestr(f"{source_type}_branded_daily.csv", sa.brand_daily.to_csv(index=False))
     return buffer.getvalue()
 
 
@@ -465,17 +478,6 @@ def _render_mode4(bundle):
                 st.subheader("Ruch dzień po dniu (Current vs Previous)")
                 st.line_chart(sa.daily.set_index("day")[["Current", "Previous"]])
                 st.caption("Dzień 1 = początek okresu; linie nałożone dla porównania.")
-            if sa.brand_terms:
-                branded_current = float(sa.brand_daily["Current"].sum())
-                branded_previous = float(sa.brand_daily["Previous"].sum())
-                st.subheader("Branded search")
-                st.metric(
-                    "Kliknięcia brandowe",
-                    f"{branded_current:,.0f}".replace(",", " "),
-                    delta=f"{branded_current - branded_previous:+,.0f}".replace(",", " "),
-                )
-                st.caption("Frazy: " + ", ".join(sa.brand_terms))
-                st.line_chart(sa.brand_daily.set_index("day")[["Current", "Previous"]])
             tree = sa.tree
             if tree.empty:
                 st.write("(brak danych kategorii)")
@@ -758,6 +760,54 @@ def render_mode5():
         _render_mode5_results(saved)
 
 
+def render_mode7():
+    if single_site is None:
+        st.warning("Brak serwisów z skonfigurowanymi frazami brandowymi.")
+        return
+    site = sites[single_site]
+    st.caption(
+        "Analiza korzysta wyłącznie z danych Google Search (web), ponieważ tylko "
+        "dla tego źródła dostępne są dane o zapytaniach i słowach kluczowych."
+    )
+    if run:
+        if preset_id == 7:
+            if not _check_periods():
+                return
+            current, previous = _period(cur_start, cur_end), _period(prev_start, prev_end)
+        else:
+            current, previous = app._compute_preset_periods(preset_id)
+        try:
+            with st.spinner(f"Pobieram branded search dla {site.name}…"):
+                daily = analyze_branded_search(
+                    site,
+                    current,
+                    previous,
+                    global_config.google_credentials_path,
+                    use_cache,
+                )
+        except GSCError as exc:
+            st.error(f"{site.name}: {exc}")
+            return
+        st.session_state["m7_result"] = {
+            "site_key": single_site,
+            "current": current,
+            "previous": previous,
+            "daily": daily,
+        }
+
+    result = st.session_state.get("m7_result")
+    if not result or result["site_key"] != single_site:
+        st.info("Ustaw serwis i okres, a następnie kliknij **Uruchom analizę**.")
+        return
+    current, previous = result["current"], result["previous"]
+    st.subheader(
+        f"{site.name} — branded search ({current.start}–{current.end} vs "
+        f"{previous.start}–{previous.end})"
+    )
+    st.caption("Frazy: " + ", ".join(site.brand_terms))
+    st.line_chart(result["daily"].set_index("day")[["Current", "Previous"]])
+
+
 MODE_DESCRIPTIONS = {
     "1": (
         "**Tryb 1 — Porównaj DWA serwisy.** Szczegółowe porównanie dwóch domen "
@@ -804,10 +854,16 @@ MODE_DESCRIPTIONS = {
         "**Uruchom analizę**. Pierwsze pobranie jest wolniejsze (7 serwisów), kolejne "
         "idą z cache."
     ),
+    "7": (
+        "**Tryb 7 — Branded search.** Dzienny wykres kliknięć z zapytań zawierających "
+        "skonfigurowane frazy brandowe, porównujący bieżący i poprzedni okres. "
+        "To wyłącznie dane Google Search (web), ponieważ tylko tam dostępne są "
+        "zapytania i słowa kluczowe."
+    ),
 }
 
 with st.expander("ℹ️ Jak używać — opis wszystkich trybów", expanded=False):
-    for _key in ("1", "2", "3", "4", "5", "6"):
+    for _key in ("1", "2", "3", "4", "5", "6", "7"):
         st.markdown(MODE_DESCRIPTIONS[_key])
         st.markdown("---")
 
@@ -836,6 +892,8 @@ elif mode.startswith("6"):
         st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
 elif mode.startswith("5"):
     render_mode5()
+elif mode.startswith("7"):
+    render_mode7()
 elif run:
     if not selected:
         st.info("Wybierz serwisy w panelu po lewej.")

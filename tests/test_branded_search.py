@@ -1,6 +1,10 @@
 from unittest.mock import Mock
 
-from analysis import _brand_query_regex
+import pandas as pd
+
+import analysis as analysis_module
+from analysis import Period, _brand_query_regex, analyze_branded_search
+from config import SiteConfig
 from services import gsc_service
 
 
@@ -50,3 +54,31 @@ def test_gsc_cache_separates_query_filters():
     assert gsc_service._cache_path(*common, query_filter="fakt") != (
         gsc_service._cache_path(*common, query_filter="onet")
     )
+
+
+def test_analyze_branded_search_returns_aligned_daily_series(monkeypatch):
+    site = SiteConfig(
+        "fakt", "Fakt", "https://www.fakt.pl/", "https://www.fakt.pl/", [],
+        brand_terms=["fakt"],
+    )
+    calls = []
+
+    def fake_get_gsc_data(start, end, prop, credentials, **kwargs):
+        calls.append(kwargs)
+        clicks = [4, 6] if start == "2026-07-01" else [2, 3]
+        return pd.DataFrame({"date": [start, end], "clicks": clicks})
+
+    monkeypatch.setattr(analysis_module, "get_gsc_data", fake_get_gsc_data)
+    result = analyze_branded_search(
+        site,
+        Period("2026-07-01", "2026-07-02"),
+        Period("2026-06-01", "2026-06-02"),
+        "credentials",
+    )
+
+    assert list(result.columns) == ["day", "Current", "Previous"]
+    assert list(result["Current"]) == [4, 6]
+    assert list(result["Previous"]) == [2, 3]
+    assert len(calls) == 2
+    assert all(call["search_type"] == "web" for call in calls)
+    assert all(call["query_filter"] == r"(?i).*(?:fakt).*" for call in calls)
