@@ -8,6 +8,7 @@ from analysis import (
     _brand_query_regex,
     analyze_branded_search,
     analyze_branded_search_period,
+    branded_search_export_frame,
 )
 from config import SiteConfig
 from services import gsc_service
@@ -108,3 +109,35 @@ def test_analyze_branded_search_period_fills_missing_dates(monkeypatch):
 
     assert list(result["date"]) == ["2026-07-01", "2026-07-02", "2026-07-03"]
     assert list(result["clicks"]) == [8, 0, 5]
+
+
+def test_branded_export_frame_includes_single_period_and_comparison_rows():
+    site = SiteConfig(
+        "fakt", "Fakt", "https://www.fakt.pl/", "https://www.fakt.pl/", [],
+        brand_terms=["fakt"],
+    )
+    results = {
+        "fakt": {
+            "current": Period("2026-07-01", "2026-07-02"),
+            "previous": None,
+            "daily": pd.DataFrame(
+                {"date": ["2026-07-01", "2026-07-02"], "clicks": [8, 5]}
+            ),
+        },
+    }
+
+    exported = branded_search_export_frame(results, {"fakt": site})
+
+    assert list(exported["site_name"]) == ["Fakt", "Fakt"]
+    assert list(exported["date"]) == ["2026-07-01", "2026-07-02"]
+    assert list(exported["current_clicks"]) == [8, 5]
+    assert exported["previous_clicks"].isna().all()
+
+    results["fakt"]["previous"] = Period("2026-06-01", "2026-06-02")
+    results["fakt"]["daily"] = pd.DataFrame(
+        {"day": [1, 2], "Current": [8, 5], "Previous": [6, 4]}
+    )
+    comparison = branded_search_export_frame(results, {"fakt": site})
+    assert list(comparison["day"]) == [1, 2]
+    assert list(comparison["current_clicks"]) == [8, 5]
+    assert list(comparison["previous_clicks"]) == [6, 4]

@@ -23,6 +23,7 @@ from analysis import (
     analyze_site,
     analyze_branded_search,
     analyze_branded_search_period,
+    branded_search_export_frame,
     analyze_site_multi_source,
     analyze_site_sources,
     build_url_metrics,
@@ -815,6 +816,7 @@ def render_mode7():
             periods = {key: (period, None) for key in brand_site_keys}
 
         results = {}
+        errors = []
         for key in brand_site_keys:
             site = sites[key]
             current, previous = periods[key]
@@ -836,7 +838,10 @@ def render_mode7():
                             use_cache,
                         )
             except GSCError as exc:
-                st.warning(f"{site.name}: {exc}")
+                errors.append(f"{site.name}: {exc}")
+                continue
+            except Exception as exc:
+                errors.append(f"{site.name}: {type(exc).__name__}: {exc}")
                 continue
             results[key] = {
                 "current": current,
@@ -845,11 +850,27 @@ def render_mode7():
             }
         st.session_state["m7_results"] = results
         st.session_state["m7_period_mode"] = m7_period_mode
+        st.session_state["m7_errors"] = errors
 
     results = st.session_state.get("m7_results")
     if not results or st.session_state.get("m7_period_mode") != m7_period_mode:
+        if st.session_state.get("m7_period_mode") == m7_period_mode:
+            for error in st.session_state.get("m7_errors", []):
+                st.warning(error)
+            if st.session_state.get("m7_errors"):
+                return
         st.info("Ustaw zakres analizy i kliknij **Uruchom analizę**.")
         return
+    export = branded_search_export_frame(results, sites)
+    st.download_button(
+        "Pobierz dane branded search (CSV)",
+        export.to_csv(index=False).encode("utf-8-sig"),
+        file_name="branded_search.csv",
+        mime="text/csv",
+        key="m7_download_csv",
+    )
+    for error in st.session_state.get("m7_errors", []):
+        st.warning(error)
     for key, result in results.items():
         site = sites[key]
         current, previous = result["current"], result["previous"]

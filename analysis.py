@@ -289,6 +289,48 @@ def analyze_branded_search_period(
     return _branded_daily_data(site_config, period, credentials_path, use_cache)
 
 
+def branded_search_export_frame(
+    results: dict[str, dict], sites: dict[str, SiteConfig]
+) -> pd.DataFrame:
+    """Normalizes branded chart results to rows suitable for a combined CSV."""
+    columns = [
+        "site_key",
+        "site_name",
+        "date",
+        "day",
+        "current_period_start",
+        "current_period_end",
+        "previous_period_start",
+        "previous_period_end",
+        "current_clicks",
+        "previous_clicks",
+    ]
+    rows = []
+    for site_key, result in results.items():
+        site = sites[site_key]
+        current = result["current"]
+        previous = result["previous"]
+        daily = result["daily"]
+        for _, point in daily.iterrows():
+            rows.append(
+                {
+                    "site_key": site_key,
+                    "site_name": site.name,
+                    "date": point.get("date"),
+                    "day": point.get("day"),
+                    "current_period_start": current.start,
+                    "current_period_end": current.end,
+                    "previous_period_start": previous.start if previous else None,
+                    "previous_period_end": previous.end if previous else None,
+                    "current_clicks": (
+                        point.get("Current") if previous else point.get("clicks")
+                    ),
+                    "previous_clicks": point.get("Previous") if previous else None,
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
 def analyze_source(
     site_config: SiteConfig,
     current_period: Period,
