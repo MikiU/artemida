@@ -286,6 +286,14 @@ Można wybrać własny zakres dat, porównać dwa okresy albo pobrać pełną do
 historię (maksymalnie 16 miesięcy). Każdy serwis ma osobny dzienny wykres.
 To wyłącznie dane Search (web), ponieważ tylko dla tego źródła GSC udostępnia
 zapytania.
+
+**Tryb 8** pobiera bezpośrednio z GSC dzienne kliknięcia i wyświetlenia dla
+wszystkich serwisów z `sites.yaml` i wybranych źródeł Search, Discover oraz News.
+Nie pobiera ani nie wymaga sitemap. Można użyć presetów lub własnych dat dla
+okresu bieżącego i porównawczego, pobrać komplet danych dziennych jako CSV oraz
+obejrzeć wykresy ruchu i dzienne odchylenia per źródło/serwis. Próg odchylenia
+jest regulowany w panelu; błędy pojedynczego serwisu lub źródła nie zatrzymują
+pozostałych pobrań.
 CLI (`python app.py`) działa dalej niezależnie.
 
 ---

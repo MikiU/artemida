@@ -15,6 +15,7 @@ import zipfile
 from calendar import monthrange
 from datetime import date, timedelta
 
+import pandas as pd
 import streamlit as st
 
 import app  # reużycie funkcji budujących DataFrame (bez duplikacji logiki)
@@ -26,6 +27,7 @@ from analysis import (
     branded_search_export_frame,
     analyze_site_multi_source,
     analyze_site_sources,
+    analyze_site_daily_sources,
     build_url_metrics,
 )
 from config import ConfigError, load_global_config, load_sites
@@ -89,6 +91,7 @@ mode = st.sidebar.radio(
         "5 – Lista URL-i → dane",
         "6 – Grupa: przegląd wszystkich serwisów",
         "7 – Branded search (Search)",
+        "8 – Ruch dzienny wszystkich serwisów (bez sitemap)",
     ],
 )
 selected = st.sidebar.multiselect(
@@ -141,6 +144,19 @@ elif mode.startswith("6"):
         format_func=lambda t: app.SOURCE_LABELS[t],
         key="m6_src",
     )
+elif mode.startswith("8"):
+    preset_label = st.sidebar.selectbox("Okres", list(PRESETS.keys()), key="m8_preset")
+    preset_id = PRESETS[preset_label]
+    sources_sel = st.sidebar.multiselect(
+        "Źródła",
+        ["web", "discover", "news"],
+        default=["web", "discover", "news"],
+        format_func=lambda t: app.SOURCE_LABELS[t],
+        key="m8_src",
+    )
+    deviation_threshold = st.sidebar.slider(
+        "Próg dziennego odchylenia (%)", 10, 200, 30, step=10, key="m8_threshold"
+    )
 elif mode.startswith("7"):
     brand_site_keys = [key for key in site_keys if sites[key].brand_terms]
     m7_period_mode = st.sidebar.radio(
@@ -184,7 +200,7 @@ elif mode.startswith("5"):
     compare_urls = st.sidebar.checkbox("Porównaj dwa okresy", value=False)
 
 # Tryby 4 i 6 korzystają z presetów dat; własne daty tylko przy presecie 7.
-_preset_mode = mode.startswith("4") or mode.startswith("6") or mode.startswith("7")
+_preset_mode = mode.startswith("4") or mode.startswith("6") or mode.startswith("7") or mode.startswith("8")
 # Kalendarze pokazujemy tam, gdzie są używane. W trybie 5 "Previous" tylko przy
 # włączonym porównaniu – inaczej wystarczy jeden okres (start–koniec).
 _need_current = (not _preset_mode) or (preset_id == 7 and not mode.startswith("7"))
@@ -654,6 +670,214 @@ def _render_group(bundle):
     _render_mode4(drill_bundle)
 
 
+def _compute_daily_group(preset, sources_types):
+    """Pobiera dzienne dane wszystkich serwisów bez korzystania z sitemap."""
+    if not sources_types:
+        st.info("Wybierz co najmniej jedno źródło (Search/Discover/News).")
+        return None
+    if preset == 7:
+        if not _check_periods():
+            return None
+        current, previous = _period(cur_start, cur_end), _period(prev_start, prev_end)
+    else:
+        current, previous = app._compute_preset_periods(preset)
+
+    entries = []
+    total = len(site_keys) * len(sources_types)
+    progress = st.progress(0.0, text="Pobieram dzienne dane GSC…")
+    completed = 0
+    for key in site_keys:
+        site = sites[key]
+        entry = {"site_key": key, "site_name": site.name, "series": {}, "errors": {}}
+        for source in sources_types:
+            progress.progress(
+                completed / total,
+                text=f"Pobieram {app.SOURCE_LABELS[source]} — {site.name}…",
+            )
+            try:
+                entry["series"][source] = analyze_site_daily_sources(
+                    site,
+                    current,
+                    previous,
+                    global_config.google_credentials_path,
+                    [source],
+                    use_cache,
+                )[source]
+            except GSCError as exc:
+                entry["errors"][source] = str(exc)
+            completed += 1
+        entries.append(entry)
+    progress.progress(1.0, text="Gotowe.")
+    progress.empty()
+    return {
+        "current": current,
+        "previous": previous,
+        "sources": list(sources_types),
+        "entries": entries,
+    }
+
+
+DAILY_EXPORT_COLS = [
+    "site_key",
+    "site_name",
+    "source",
+    "day",
+    "current_date",
+    "previous_date",
+    "current_clicks",
+    "previous_clicks",
+    "clicks_change",
+    "clicks_change_pct",
+    "current_impressions",
+    "previous_impressions",
+    "impressions_change",
+    "impressions_change_pct",
+]
+
+
+def _daily_group_export(bundle):
+    frames = []
+    for entry in bundle["entries"]:
+        for source, daily in entry["series"].items():
+            frames.append(
+                daily.assign(
+                    site_key=entry["site_key"],
+                    site_name=entry["site_name"],
+                    source=app.SOURCE_LABELS[source],
+                )
+            )
+    if not frames:
+        return pd.DataFrame(columns=DAILY_EXPORT_COLS)
+    return pd.concat(frames, ignore_index=True)[DAILY_EXPORT_COLS]
+
+
+def _render_daily_group(bundle):
+    current, previous = bundle["current"], bundle["previous"]
+    sources_types = bundle["sources"]
+    cd = (date.fromisoformat(current.end) - date.fromisoformat(current.start)).days + 1
+    pd_ = (date.fromisoformat(previous.end) - date.fromisoformat(previous.start)).days + 1
+    if cd != pd_:
+        st.warning(f"Okresy mają różną długość ({cd} vs {pd_} dni) — porównanie może być zaburzone.")
+    st.info(
+        f"**{len(bundle['entries'])} serwisów — bez sitemap**\n\n"
+        f"CURRENT {current.start}…{current.end} ({cd} dni) vs "
+        f"PREVIOUS {previous.start}…{previous.end} ({pd_} dni)"
+    )
+    for entry in bundle["entries"]:
+        for source, error in entry["errors"].items():
+            st.warning(f"{entry['site_name']} — {app.SOURCE_LABELS[source]}: {error}")
+
+    export = _daily_group_export(bundle)
+    if export.empty:
+        st.error("Nie pobrano żadnych szeregów. Sprawdź dostęp do property w GSC.")
+        return
+    st.download_button(
+        "Pobierz wszystkie dane dzienne (CSV)",
+        export.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"gsc_daily_{current.start}_{current.end}.csv",
+        mime="text/csv",
+        type="primary",
+    )
+
+    overview_rows = []
+    for entry in bundle["entries"]:
+        for source in sources_types:
+            daily = entry["series"].get(source)
+            if daily is None:
+                overview_rows.append({
+                    "site_name": entry["site_name"],
+                    "source": app.SOURCE_LABELS[source],
+                    "status": entry["errors"].get(source, "brak danych"),
+                })
+                continue
+            current_clicks = float(daily["current_clicks"].sum())
+            previous_clicks = float(daily["previous_clicks"].sum())
+            current_impressions = float(daily["current_impressions"].sum())
+            previous_impressions = float(daily["previous_impressions"].sum())
+            overview_rows.append({
+                "site_name": entry["site_name"],
+                "source": app.SOURCE_LABELS[source],
+                "status": "OK",
+                "current_clicks": current_clicks,
+                "previous_clicks": previous_clicks,
+                "clicks_change": current_clicks - previous_clicks,
+                "clicks_change_pct": (
+                    (current_clicks - previous_clicks) / previous_clicks * 100
+                    if previous_clicks else float("nan")
+                ),
+                "current_impressions": current_impressions,
+                "previous_impressions": previous_impressions,
+                "impressions_change_pct": (
+                    (current_impressions - previous_impressions) / previous_impressions * 100
+                    if previous_impressions else float("nan")
+                ),
+            })
+    overview = pd.DataFrame(overview_rows)
+    st.subheader("Zmiana ruchu per serwis i źródło")
+    st.dataframe(overview, use_container_width=True, hide_index=True)
+    _dl(overview, "gsc_daily_overview.csv")
+
+    tabs = st.tabs([app.SOURCE_LABELS[source] for source in sources_types])
+    for tab, source in zip(tabs, sources_types):
+        with tab:
+            label = app.SOURCE_LABELS[source]
+            source_overview = overview[overview["source"] == label]
+            valid = source_overview[source_overview["status"] == "OK"].copy()
+            if not valid.empty:
+                st.subheader("Zmiana kliknięć per serwis (%)")
+                st.bar_chart(valid.set_index("site_name")["clicks_change_pct"])
+            anomalies = export[
+                (export["source"] == label)
+                & (
+                    (export["clicks_change_pct"].abs() >= deviation_threshold)
+                    | (
+                        (export["previous_clicks"] == 0)
+                        & (export["current_clicks"] > 0)
+                    )
+                )
+            ].copy()
+            st.subheader(
+                f"Dni z odchyleniem co najmniej {deviation_threshold}% "
+                "lub ruchem od zera"
+            )
+            if anomalies.empty:
+                st.caption("Brak dni przekraczających wybrany próg.")
+            else:
+                anomalies = anomalies.assign(
+                    deviation_abs=anomalies["clicks_change_pct"].abs()
+                ).sort_values("deviation_abs", ascending=False)
+                st.dataframe(
+                    anomalies[[
+                        "site_name", "day", "current_date", "previous_date",
+                        "current_clicks", "previous_clicks", "clicks_change",
+                        "clicks_change_pct",
+                    ]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            sites_with_data = [
+                entry for entry in bundle["entries"] if source in entry["series"]
+            ]
+            if sites_with_data:
+                chosen = st.selectbox(
+                    "Wykres dzienny serwisu",
+                    [entry["site_key"] for entry in sites_with_data],
+                    format_func=lambda key: sites[key].name,
+                    key=f"m8_site_{source}",
+                )
+                entry = next(item for item in sites_with_data if item["site_key"] == chosen)
+                daily = entry["series"][source].set_index("day")
+                st.subheader(f"{entry['site_name']} — kliknięcia")
+                st.line_chart(daily[["current_clicks", "previous_clicks"]])
+                st.caption("Dzień okresu bieżącego jest porównany z tym samym numerem dnia okresu poprzedniego.")
+                st.subheader("Dzienne odchylenie kliknięć")
+                st.bar_chart(daily["clicks_change"])
+            _dl(
+                export[export["source"] == label],
+                f"{source}_daily_all_sites.csv",
+            )
+
+
 def _parse_urls(pasted, uploaded):
     text = pasted or ""
     if uploaded is not None:
@@ -940,10 +1164,17 @@ MODE_DESCRIPTIONS = {
         "dzienny wykres kliknięć z fraz brandowych. Są to wyłącznie dane Search "
         "(web), bo tylko tam dostępne są zapytania i słowa kluczowe."
     ),
+    "8": (
+        "**Tryb 8 — Ruch dzienny wszystkich serwisów, bez sitemap.** Pobiera "
+        "bezpośrednio z GSC kliknięcia i wyświetlenia dzienne dla Search, Discover "
+        "i News. Porównuje wybrane okresy, pokazuje zmiany per serwis, wykresy "
+        "dziennych odchyleń oraz dni przekraczające ustawiony próg. Dane można "
+        "pobrać jako CSV. Błąd jednego źródła nie zatrzymuje pozostałych."
+    ),
 }
 
 with st.expander("ℹ️ Jak używać — opis wszystkich trybów", expanded=False):
-    for _key in ("1", "2", "3", "4", "5", "6", "7"):
+    for _key in ("1", "2", "3", "4", "5", "6", "7", "8"):
         st.markdown(MODE_DESCRIPTIONS[_key])
         st.markdown("---")
 
@@ -968,6 +1199,16 @@ elif mode.startswith("6"):
     saved = st.session_state.get("m6_bundle")
     if saved:
         _render_group(saved)
+    else:
+        st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
+elif mode.startswith("8"):
+    if run:
+        bundle = _compute_daily_group(preset_id, sources_sel)
+        if bundle is not None:
+            st.session_state["m8_bundle"] = bundle
+    saved = st.session_state.get("m8_bundle")
+    if saved:
+        _render_daily_group(saved)
     else:
         st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
 elif mode.startswith("5"):
