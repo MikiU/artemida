@@ -51,7 +51,7 @@ def dashboard_env(monkeypatch):
     calls = []
 
     def fake_gsc(start, end, prop, credentials, dimensions=("page",), **kwargs):
-        calls.append((prop, dimensions, kwargs))
+        calls.append((prop, dimensions, {**kwargs, "start_date": start, "end_date": end}))
         key = prop.split(":")[-1].split(".")[0]
         dates = pd.date_range(start, end).strftime("%Y-%m-%d")
         clicks = 3 if kwargs.get("page_filter") else 10
@@ -133,10 +133,10 @@ def test_dates_history_and_empty_selection(dashboard_env):
     app_test.selectbox[0].set_value("Własne daty").run()
     assert len(app_test.date_input) == 4
     app_test.sidebar.radio[0].set_value("Branded search").run()
-    app_test.radio(key="settings:Branded search:history").set_value("Pełna dostępna historia").run()
+    app_test.selectbox(key="settings:Branded search:preset").set_value("Maksymalny zakres (16 miesięcy)").run()
     assert not app_test.exception
     assert not app_test.date_input
-    assert not app_test.selectbox
+    assert len(app_test.selectbox) == 1
     assert not calls
 
 
@@ -215,3 +215,69 @@ def test_unassigned_url_blocks_api_requests(dashboard_env):
     assert not app_test.exception
     assert next(widget for widget in app_test.button if widget.label == "Uruchom analizę").disabled
     assert not calls
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_all_views_offer_year_and_full_history_without_comparison(dashboard_env, view):
+    app_test, _, calls = dashboard_env
+    app_test.run()
+    app_test.sidebar.radio[0].set_value(view).run()
+    app_test.checkbox(key=f"settings:{view}:compare").uncheck().run()
+    period = app_test.selectbox(key=f"settings:{view}:preset")
+    assert "Ostatni rok (365 dni)" in period.options
+    assert "Maksymalny zakres (16 miesięcy)" in period.options
+    period.set_value("Maksymalny zakres (16 miesięcy)").run()
+    assert not app_test.exception
+    assert not app_test.date_input
+    assert not any("Poprzedni:" in caption.value for caption in app_test.caption)
+    assert not calls
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_full_history_fetches_only_one_period_in_every_view(dashboard_env, view):
+    from dashboard import _single_period
+    from datetime import date
+
+    app_test, _, calls = dashboard_env
+    app_test.run()
+    app_test.sidebar.radio[0].set_value(view).run()
+    app_test.multiselect(key="selected_sites").set_value(["a", "b"]).run()
+    if view != VIEWS[2]:
+        app_test.multiselect(key="selected_sources").set_value(["web", "discover"]).run()
+    app_test.checkbox(key=f"settings:{view}:compare").uncheck().run()
+    app_test.selectbox(key=f"settings:{view}:preset").set_value("Maksymalny zakres (16 miesięcy)").run()
+    if view == VIEWS[3]:
+        app_test.text_area[0].set_value("https://a.pl/news/article\nhttps://b.pl/news/article").run()
+    run_analysis(app_test)
+    assert not app_test.exception
+    assert calls
+    saved = app_test.session_state["result:" + view]
+    assert saved["request"].previous is None
+    assert saved["request"].current == _single_period("Maksymalny zakres (16 miesięcy)", date.today())
+    assert all(kwargs["start_date"] == saved["request"].current.start and kwargs["end_date"] == saved["request"].current.end for _, _, kwargs in calls)
+    assert set(saved["daily"]["period"]) == {"current"}
+    assert not [widget for widget in app_test.checkbox if widget.label == "Pokaż poprzedni okres"]
+    for frame in app_test.dataframe:
+        assert not any(column.startswith("previous_") or "_change" in column for column in frame.value)
+    if view == VIEWS[1]:
+        assert any(header.value == "Kategorie z największym ruchem" for header in app_test.subheader)
+        assert not any(header.value == "Kategorie rosnące" for header in app_test.subheader)
+
+
+@pytest.mark.parametrize("label,length", [("Ostatnie 7 dni", 7), ("Ostatnie 30 dni", 30), ("Ostatni rok (365 dni)", 365)])
+def test_single_period_preset_lengths(label, length):
+    from dashboard import _single_period
+    from datetime import date
+
+    result = _single_period(label, date(2026, 10, 29))
+    assert result.end == "2026-10-26"
+    assert (date.fromisoformat(result.end) - date.fromisoformat(result.start)).days + 1 == length
+
+
+def test_full_history_clamps_month_end():
+    from dashboard import _single_period
+    from datetime import date
+
+    result = _single_period("Maksymalny zakres (16 miesięcy)", date(2024, 6, 30))
+    assert result.start == "2023-02-28"
+    assert result.end == "2024-06-27"

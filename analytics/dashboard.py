@@ -183,11 +183,11 @@ def collect_dashboard(request: AnalysisRequest, sites: dict[str, SiteConfig], cr
                 if request.view == VIEWS[0]:
                     source_daily.append(_overview_series(request, site, source, credentials))
                 elif request.view == VIEWS[1]:
-                    if request.previous is None:
-                        raise ValueError("Analiza kategorii wymaga porównania okresów.")
                     result = analyze_source(site, request.current, request.previous, credentials, category_urls, source, request.use_cache, with_timeseries=True)
                     source_pages, source_tree, source_device = result.pages, result.tree, result.device
                     for name, period, column in (("current", request.current, "Current"), ("previous", request.previous, "Previous")):
+                        if period is None:
+                            continue
                         data = result.daily[["day", column]].copy()
                         data["date"] = (pd.Timestamp(period.start) + pd.to_timedelta(data["day"] - 1, unit="D")).dt.strftime("%Y-%m-%d")
                         source_daily.append(_daily_frame(data.rename(columns={column: "clicks"}), period, name, site, source))

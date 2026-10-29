@@ -334,7 +334,7 @@ def branded_search_export_frame(
 def analyze_source(
     site_config: SiteConfig,
     current_period: Period,
-    previous_period: Period,
+    previous_period: Period | None,
     credentials_path: str,
     category_urls: list[str],
     search_type: str,
@@ -360,7 +360,7 @@ def analyze_source(
         dimensions=("page",),
         search_type=search_type,
         use_cache=use_cache,
-    )
+    ) if previous_period else current_pages.iloc[:0].copy()
 
     print(f"[{site_config.name}] GSC [{search_type}] – device...")
     if search_type != "web":
@@ -386,7 +386,7 @@ def analyze_source(
             dimensions=("device",),
             search_type=search_type,
             use_cache=use_cache,
-        )
+        ) if previous_period else current_device.iloc[:0].copy()
         device = _device_table(current_device, previous_device)
 
     pages = compare_periods(current_pages, previous_pages)
@@ -415,12 +415,19 @@ def analyze_source(
             dimensions=("date",),
             search_type=search_type,
             use_cache=use_cache,
-        )
+        ) if previous_period else current_daily.iloc[:0].copy()
         daily = _daily_series(current_daily, previous_daily)
         daily_current = _daily_by_date(current_daily)
     else:
         daily = pd.DataFrame()
         daily_current = pd.DataFrame()
+
+    previous_clicks = float(pages["previous_clicks"].sum())
+    if previous_period is None:
+        pages, tree, device, daily = (
+            frame.drop(columns=[column for column in frame if column.startswith("previous_") or "_change" in column or column == "Previous"])
+            for frame in (pages, tree, device, daily)
+        )
 
     return SourceAnalysis(
         search_type=search_type,
@@ -428,7 +435,7 @@ def analyze_source(
         tree=tree,
         device=device,
         current_clicks=float(pages["current_clicks"].sum()),
-        previous_clicks=float(pages["previous_clicks"].sum()),
+        previous_clicks=previous_clicks,
         daily=daily,
         daily_current=daily_current,
     )

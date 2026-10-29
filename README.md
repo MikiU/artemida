@@ -295,7 +295,15 @@ i wybranych źródeł rozdzielają Search, Discover i News. Branded ma tylko Sea
 Pełne tabele są widoczne od razu; ranking TOP 20 nie ogranicza pełnych wyników.
 
 Daty ręczne pojawiają się tylko przy własnym zakresie, a daty porównawcze
-tylko przy porównaniu. Różne długości okresów są sygnalizowane i nie powodują
+tylko przy porównaniu. W każdym widoku można wyłączyć **Porównaj okresy**
+i pobrać jeden zakres: ostatnie 7, 14 lub 30 dni, ostatni rok (365 dni),
+ostatni pełny miesiąc, własne daty albo **Maksymalny zakres (16 miesięcy)**.
+Maksymalna historia zaczyna się 16 miesięcy przed bieżącą datą i kończy
+3 dni temu, zgodnie z przyjętym opóźnieniem GSC. Poszczególne properties
+mogą mieć krótszą historię; ograniczenia kompletności raportów GSC nadal obowiązują.
+Bez porównania kategorie są sortowane według ruchu, bez sztucznych zmian
+względem zera i bez pobierania danych poprzedniego okresu.
+Różne długości okresów są sygnalizowane i nie powodują
 obcięcia dłuższego okresu. Cache jest w ustawieniach zaawansowanych.
 Zmiana parametrów zapytania ukrywa nieaktualne wyniki; zmiana sumy, metryki,
 progu odchylenia lub pobranie eksportu nie odpytuje ponownie GSC.

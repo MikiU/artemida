@@ -6,7 +6,6 @@ import hmac
 import io
 import os
 import zipfile
-from calendar import monthrange
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -77,28 +76,32 @@ def _set_sites(keys):
     st.session_state["selected_sites"] = list(keys)
 
 
+def _single_period(label, today):
+    end = today - timedelta(days=app.GSC_LAG_DAYS)
+    if label == "Maksymalny zakres (16 miesięcy)":
+        start = (pd.Timestamp(today) - pd.DateOffset(months=16)).date()
+    elif label == "Ostatni pełny miesiąc":
+        return app._compute_preset_periods(6, today)[0]
+    else:
+        days = {"Ostatnie 7 dni": 7, "Ostatnie 14 dni": 14, "Ostatnie 30 dni": 30, "Ostatni rok (365 dni)": 365}[label]
+        start = end - timedelta(days=days - 1)
+    return Period(start.isoformat(), end.isoformat())
+
+
 def _period_controls(view):
     today = date.today()
     prefix = f"settings:{view}"
-    compare = view in VIEWS[:2]
-    history = False
-    if view == VIEWS[2]:
-        history = st.sidebar.radio("Zakres analizy", ["Zakres dat", "Pełna dostępna historia"], key=prefix + ":history") == "Pełna dostępna historia"
-    if history:
-        end = today - timedelta(days=3)
-        month_index = end.year * 12 + end.month - 1 - 16
-        year, month = divmod(month_index, 12)
-        start = date(year, month + 1, min(end.day, monthrange(year, month + 1)[1]))
-        return Period(start.isoformat(), end.isoformat()), None
-    if view in VIEWS[2:]:
-        compare = st.sidebar.checkbox("Porównaj okresy", key=prefix + ":compare")
-    labels = list(PRESETS) if compare else ["Ostatnie 7 dni", "Ostatnie 14 dni", "Ostatnie 30 dni", "Ostatni pełny miesiąc", "Własne daty"]
+    compare = st.sidebar.checkbox("Porównaj okresy", value=view in VIEWS[:2], key=prefix + ":compare")
+    labels = list(PRESETS) if compare else [
+        "Ostatnie 7 dni", "Ostatnie 14 dni", "Ostatnie 30 dni", "Ostatni rok (365 dni)",
+        "Ostatni pełny miesiąc", "Maksymalny zakres (16 miesięcy)", "Własne daty",
+    ]
     default = len(labels) - 1 if view in VIEWS[2:] else 0
     label = st.sidebar.selectbox("Okres", labels, index=default, key=prefix + ":preset")
     if label != "Własne daty":
-        preset = PRESETS[label] if compare else {"Ostatnie 7 dni": 1, "Ostatnie 14 dni": 2, "Ostatnie 30 dni": 3, "Ostatni pełny miesiąc": 6}[label]
-        current, previous = app._compute_preset_periods(preset, today)
-        return current, previous if compare else None
+        if not compare:
+            return _single_period(label, today), None
+        return app._compute_preset_periods(PRESETS[label], today)
     start = st.sidebar.date_input("Od", today - timedelta(days=32), key=prefix + ":start")
     end = st.sidebar.date_input("Do", today - timedelta(days=3), key=prefix + ":end")
     current = Period(start.isoformat(), end.isoformat())
@@ -219,13 +222,19 @@ def _category_details(bundle, selected_sources, sites_config, suffix):
             subset = pages[pages["site_key"] == key]
             if not subset.empty:
                 site = sites_config.sites[key]
-                tree = tag_ymyl(build_category_tree(subset), site.ymyl_paths, site.ymyl_exclude_paths)
+                tree_input = subset if request.previous else subset.assign(previous_clicks=0.0, previous_impressions=0.0)
+                tree = tag_ymyl(build_category_tree(tree_input), site.ymyl_paths, site.ymyl_exclude_paths)
+                if request.previous is None:
+                    tree = tree.drop(columns=[column for column in tree if column.startswith("previous_") or "_change" in column])
                 frames.append(tree.assign(site_key=key, site_name=site.name))
         trees = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not trees.empty:
-        metric = "clicks_change"
-        _table(trees[trees[metric] > 0].sort_values(metric, ascending=False).head(20), "Kategorie rosnące", f"{suffix}_growing.csv")
-        _table(trees[trees[metric] < 0].sort_values(metric).head(20), "Kategorie spadające", f"{suffix}_declining.csv")
+        if request.previous:
+            metric = "clicks_change"
+            _table(trees[trees[metric] > 0].sort_values(metric, ascending=False).head(20), "Kategorie rosnące", f"{suffix}_growing.csv")
+            _table(trees[trees[metric] < 0].sort_values(metric).head(20), "Kategorie spadające", f"{suffix}_declining.csv")
+        else:
+            _table(trees.sort_values("current_clicks", ascending=False).head(20), "Kategorie z największym ruchem", f"{suffix}_top_categories.csv")
         _table(trees, "Wszystkie kategorie", f"{suffix}_categories.csv")
     _table(pages, "Wszystkie URL-e", f"{suffix}_pages.csv")
     ymyl_frames = []
@@ -241,7 +250,7 @@ def _category_details(bundle, selected_sources, sites_config, suffix):
         _table(pd.concat(ymyl_frames, ignore_index=True), "YMYL i pozostałe treści", f"{suffix}_ymyl.csv")
     if "web" in selected_sources:
         _table(select_sources(bundle["devices"], ("web",)), "Urządzenia — Search", f"{suffix}_devices.csv")
-    if len(request.site_keys) == 2:
+    if request.previous and len(request.site_keys) == 2:
         pair = []
         for key in request.site_keys:
             tree = trees[trees["site_key"] == key]
@@ -399,7 +408,7 @@ def main():
     st.sidebar.caption(f"Bieżący: {current.start} — {current.end}")
     if previous:
         st.sidebar.caption(f"Poprzedni: {previous.start} — {previous.end}")
-    threshold = st.sidebar.slider("Próg dziennego odchylenia (%)", 10, 200, 30, step=10) if view == VIEWS[0] else 30
+    threshold = st.sidebar.slider("Próg dziennego odchylenia (%)", 10, 200, 30, step=10) if view == VIEWS[0] and previous else 30
     with st.sidebar.expander("Zaawansowane"):
         use_cache = st.checkbox("Użyj cache", value=True, key="use_cache")
     st.header(view)
