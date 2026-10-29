@@ -7,6 +7,7 @@
 # base_url: adres domeny (walidacja hostów sitemap).
 # category_sitemaps: lista URL-i sitemap kategorii (jedna lub kilka; .gz obsługiwane).
 # ymyl_paths: top-level kategorie uznane za YMYL (finanse, polityka, zdrowie).
+# brand_terms: frazy brandowe dopasowywane jako fragmenty zapytania, bez względu na wielkość liter.
 
 # Globalne YMYL dla serwisów bez własnej listy.
 ymyl_paths:
@@ -27,6 +28,9 @@ sites:
     base_url: "https://www.example.com/"
     category_sitemaps:
       - "https://www.example.com/sitemap-categories.xml"
+    brand_terms:
+      - "example"
+      - "example.com"
     ymyl_paths:
       - "Polityka"
       - "Pieniadze"

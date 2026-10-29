@@ -1,55 +1,71 @@
-"""Lokalny dashboard Streamlit dla GSC Analyzer (tryby 1/2/3).
-
-Uruchomienie:
-    streamlit run dashboard.py
-
-Interfejs jest cienką warstwą nad istniejącą logiką (analysis.py, analytics/*),
-więc cała matematyka to te same, przetestowane funkcje – dashboard je tylko wywołuje.
-"""
+"""Streamlit dashboard. Run with: streamlit run dashboard.py."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import io
 import os
-import re
 import zipfile
+from calendar import monthrange
 from datetime import date, timedelta
+from types import SimpleNamespace
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
-import app  # reużycie funkcji budujących DataFrame (bez duplikacji logiki)
-from analysis import (
-    Period,
-    analyze_site,
-    analyze_site_multi_source,
-    analyze_site_sources,
-    build_url_metrics,
+import app
+from analysis import Period
+from analytics.dashboard import (
+    AnalysisRequest,
+    IDENTITY,
+    SOURCE_LABELS,
+    VIEWS,
+    collect_dashboard,
+    combine_sources,
+    daily_overview,
+    parse_urls,
+    properties_overlap,
+    select_sources,
+    url_candidates,
 )
+from analytics.comparison import build_category_tree
+from analytics.ymyl import tag_ymyl
 from config import ConfigError, load_global_config, load_sites
-from services.gsc_service import GSCError, get_gsc_data
-from services.sitemap_service import SitemapError
-
-st.set_page_config(page_title="Artemida", layout="wide")
-st.title("Artemida — analiza Google Search Console")
-
-# Hosting (Streamlit Cloud): przenieś sekrety do środowiska, by config je zobaczył.
-for _secret_key in ("GOOGLE_CREDENTIALS_JSON", "SITES_YAML", "APP_PASSWORD"):
-    try:
-        if _secret_key in st.secrets:
-            os.environ[_secret_key] = str(st.secrets[_secret_key])
-    except Exception:
-        pass
 
 
-def _password_gate() -> None:
-    """Prosta bramka hasłem, jeśli ustawiono APP_PASSWORD (sekret/env)."""
+PRESETS = {
+    "Tydzień do tygodnia": 1,
+    "Dwa tygodnie do dwóch tygodni": 2,
+    "Miesiąc do miesiąca (30 dni)": 3,
+    "Tydzień rok do roku": 4,
+    "Miesiąc rok do roku": 5,
+    "Miesiąc kalendarzowy": 6,
+    "Własne daty": 7,
+}
+COLORS = ("#007f75", "#c44240", "#3973b9", "#bb7900", "#9b5390", "#518333", "#cf6341", "#546a76")
+COLUMN_LABELS = {
+    "site_key": "ID serwisu", "site_name": "Serwis", "source": "Źródło",
+    "period": "Okres", "date": "Data", "day": "Dzień okresu", "page": "URL", "url": "URL",
+    "category_path": "Kategoria", "depth": "Poziom", "number_of_urls": "Liczba URL-i",
+    "current_clicks": "Kliknięcia", "previous_clicks": "Kliknięcia poprzednio",
+    "current_impressions": "Wyświetlenia", "previous_impressions": "Wyświetlenia poprzednio",
+    "clicks_change": "Zmiana kliknięć", "clicks_change_pct": "Zmiana kliknięć (%)",
+    "impressions_change": "Zmiana wyświetleń", "impressions_change_pct": "Zmiana wyświetleń (%)",
+    "current_ctr": "CTR", "previous_ctr": "CTR poprzednio", "status": "Status", "error": "Komunikat",
+    "clicks": "Kliknięcia", "impressions": "Wyświetlenia", "device": "Urządzenie", "ymyl": "YMYL",
+    "current_position": "Pozycja", "previous_position": "Pozycja poprzednio", "position_change": "Zmiana pozycji",
+    "share_clicks_pct": "Udział kliknięć (%)", "share_impressions_pct": "Udział wyświetleń (%)",
+    "current_date": "Data bieżąca", "previous_date": "Data porównawcza",
+}
+
+
+def _password_gate():
     password = os.environ.get("APP_PASSWORD", "").strip()
-    if not password:
-        st.sidebar.caption("⚠️ Dostęp otwarty (brak APP_PASSWORD).")
-        return
-    if st.session_state.get("_auth_ok"):
+    if not password or st.session_state.get("_auth_ok"):
         return
     entered = st.text_input("Hasło dostępu", type="password")
-    if entered and entered == password:
+    if entered and hmac.compare_digest(entered.encode(), password.encode()):
         st.session_state["_auth_ok"] = True
         st.rerun()
     if entered:
@@ -57,781 +73,366 @@ def _password_gate() -> None:
     st.stop()
 
 
-_password_gate()
+def _set_sites(keys):
+    st.session_state["selected_sites"] = list(keys)
 
 
-@st.cache_resource
-def _load_config():
-    return load_global_config(), load_sites()
+def _period_controls(view):
+    today = date.today()
+    prefix = f"settings:{view}"
+    compare = view in VIEWS[:2]
+    history = False
+    if view == VIEWS[2]:
+        history = st.sidebar.radio("Zakres analizy", ["Zakres dat", "Pełna dostępna historia"], key=prefix + ":history") == "Pełna dostępna historia"
+    if history:
+        end = today - timedelta(days=3)
+        month_index = end.year * 12 + end.month - 1 - 16
+        year, month = divmod(month_index, 12)
+        start = date(year, month + 1, min(end.day, monthrange(year, month + 1)[1]))
+        return Period(start.isoformat(), end.isoformat()), None
+    if view in VIEWS[2:]:
+        compare = st.sidebar.checkbox("Porównaj okresy", key=prefix + ":compare")
+    labels = list(PRESETS) if compare else ["Ostatnie 7 dni", "Ostatnie 14 dni", "Ostatnie 30 dni", "Ostatni pełny miesiąc", "Własne daty"]
+    default = len(labels) - 1 if view in VIEWS[2:] else 0
+    label = st.sidebar.selectbox("Okres", labels, index=default, key=prefix + ":preset")
+    if label != "Własne daty":
+        preset = PRESETS[label] if compare else {"Ostatnie 7 dni": 1, "Ostatnie 14 dni": 2, "Ostatnie 30 dni": 3, "Ostatni pełny miesiąc": 6}[label]
+        current, previous = app._compute_preset_periods(preset, today)
+        return current, previous if compare else None
+    start = st.sidebar.date_input("Od", today - timedelta(days=32), key=prefix + ":start")
+    end = st.sidebar.date_input("Do", today - timedelta(days=3), key=prefix + ":end")
+    current = Period(start.isoformat(), end.isoformat())
+    previous = None
+    if compare:
+        previous_start = st.sidebar.date_input("Poprzedni okres od", today - timedelta(days=62), key=prefix + ":previous_start")
+        previous_end = st.sidebar.date_input("Poprzedni okres do", today - timedelta(days=33), key=prefix + ":previous_end")
+        previous = Period(previous_start.isoformat(), previous_end.isoformat())
+    return current, previous
 
 
-try:
-    global_config, sites_config = _load_config()
-except ConfigError as exc:
-    st.error(str(exc))
-    st.stop()
-
-sites = sites_config.sites
-site_keys = list(sites.keys())
-
-st.sidebar.header("Ustawienia")
-mode = st.sidebar.radio(
-    "Tryb",
-    [
-        "1 – Porównaj DWA serwisy",
-        "2 – Ranking kategorii (wiele)",
-        "3 – Search/Discover/YMYL",
-        "4 – Jeden serwis (Search/Discover/News)",
-        "5 – Lista URL-i → dane",
-        "6 – Grupa: przegląd wszystkich serwisów",
-    ],
-)
-selected = st.sidebar.multiselect(
-    "Serwisy", options=site_keys, format_func=lambda k: sites[k].name
-)
-
-PRESETS = {
-    "Tydzień do tygodnia": 1,
-    "Dwa tygodnie do dwóch tygodni": 2,
-    "Miesiąc do miesiąca (30 dni)": 3,
-    "Tydzień rok do roku (YoY)": 4,
-    "Miesiąc rok do roku (YoY)": 5,
-    "Miesiąc kalendarzowy": 6,
-    "Własne daty": 7,
-}
-
-single_site = None
-preset_id = 7
-sources_sel: list[str] = []
-url_sources: list[str] = []
-compare_urls = False
-if mode.startswith("4"):
-    single_site = st.sidebar.selectbox(
-        "Serwis", site_keys, format_func=lambda k: sites[k].name
-    )
-    preset_label = st.sidebar.selectbox("Okres", list(PRESETS.keys()))
-    preset_id = PRESETS[preset_label]
-    sources_sel = st.sidebar.multiselect(
-        "Źródła",
-        ["web", "discover", "news"],
-        default=["web", "discover", "news"],
-        format_func=lambda t: app.SOURCE_LABELS[t],
-    )
-elif mode.startswith("6"):
-    preset_label = st.sidebar.selectbox("Okres", list(PRESETS.keys()), key="m6_preset")
-    preset_id = PRESETS[preset_label]
-    sources_sel = st.sidebar.multiselect(
-        "Źródła",
-        ["web", "discover", "news"],
-        default=["web", "discover", "news"],
-        format_func=lambda t: app.SOURCE_LABELS[t],
-        key="m6_src",
-    )
-elif mode.startswith("5"):
-    single_site = st.sidebar.selectbox(
-        "Serwis", site_keys, format_func=lambda k: sites[k].name, key="m5_site"
-    )
-    url_sources = st.sidebar.multiselect(
-        "Źródła",
-        ["web", "discover", "news"],
-        default=["web"],
-        format_func=lambda t: app.SOURCE_LABELS[t],
-        key="m5_src",
-    )
-    compare_urls = st.sidebar.checkbox("Porównaj dwa okresy", value=False)
-
-today = date.today()
-
-# Tryby 4 i 6 korzystają z presetów dat; własne daty tylko przy presecie 7.
-_preset_mode = mode.startswith("4") or mode.startswith("6")
-# Kalendarze pokazujemy tam, gdzie są używane. W trybie 5 "Previous" tylko przy
-# włączonym porównaniu – inaczej wystarczy jeden okres (start–koniec).
-_need_current = (not _preset_mode) or (preset_id == 7)
-_need_previous = _need_current and not (mode.startswith("5") and not compare_urls)
-cur_start = cur_end = prev_start = prev_end = None
-if _need_current:
-    st.sidebar.subheader("CURRENT PERIOD")
-    cur_start = st.sidebar.date_input("Current start", today - timedelta(days=31))
-    cur_end = st.sidebar.date_input("Current end", today - timedelta(days=2))
-    if _need_previous:
-        st.sidebar.subheader("PREVIOUS PERIOD")
-        prev_start = st.sidebar.date_input("Previous start", today - timedelta(days=62))
-        prev_end = st.sidebar.date_input("Previous end", today - timedelta(days=33))
-    _cd = (cur_end - cur_start).days + 1
-    if _need_previous:
-        _pd = (prev_end - prev_start).days + 1
-        st.sidebar.caption(f"Wybrano — Current: {_cd} dni · Previous: {_pd} dni")
-        if cur_start > cur_end or prev_start > prev_end:
-            st.sidebar.error("Data startowa jest późniejsza niż końcowa.")
-        elif _cd != _pd:
-            st.sidebar.warning(f"Różna długość okresów: {_cd} vs {_pd} dni.")
-    else:
-        st.sidebar.caption(f"Wybrano — okres: {_cd} dni")
-        if cur_start > cur_end:
-            st.sidebar.error("Data startowa jest późniejsza niż końcowa.")
-elif _preset_mode:
-    _c, _p = app._compute_preset_periods(preset_id)
-    _cd = (date.fromisoformat(_c.end) - date.fromisoformat(_c.start)).days + 1
-    _pd = (date.fromisoformat(_p.end) - date.fromisoformat(_p.start)).days + 1
-    st.sidebar.info(
-        f"CURRENT: {_c.start} … {_c.end} ({_cd} dni)\n\n"
-        f"PREVIOUS: {_p.start} … {_p.end} ({_pd} dni)"
-    )
-
-use_cache = st.sidebar.checkbox("Użyj cache", value=True)
-run = st.sidebar.button("Uruchom analizę", type="primary")
-
-
-def _period(s, e):
-    return Period(s.isoformat(), e.isoformat())
-
-
-def _check_periods():
-    if cur_start is None or cur_end is None:
-        st.error("Brak wybranego okresu.")
-        return False
-    if cur_start > cur_end:
-        st.error("Data startowa jest późniejsza niż końcowa.")
-        return False
-    cur_days = (cur_end - cur_start).days + 1
-    if prev_start is None or prev_end is None:
-        st.caption(f"Okres: {cur_days} dni")
-        return True
-    prev_days = (prev_end - prev_start).days + 1
-    st.caption(f"Current: {cur_days} dni · Previous: {prev_days} dni")
-    if prev_start > prev_end:
-        st.error("Data startowa jest późniejsza niż końcowa.")
-        return False
-    if cur_days != prev_days:
-        st.warning(
-            f"Okresy mają różną długość ({cur_days} vs {prev_days}) – "
-            "porównanie może być zaburzone."
-        )
-    return True
-
-
-def _dl(df, name):
-    st.download_button(
-        f"Pobierz {name}", df.to_csv(index=False).encode("utf-8"), name, "text/csv"
-    )
-
-
-def _analyze_sites(chosen):
-    out = []
-    for key in chosen:
-        s = sites[key]
-        try:
-            with st.spinner(f"Analizuję {s.name}…"):
-                out.append(
-                    analyze_site(
-                        s,
-                        _period(cur_start, cur_end),
-                        _period(prev_start, prev_end),
-                        global_config.google_credentials_path,
-                        use_cache,
-                    )
-                )
-        except (GSCError, SitemapError) as exc:
-            st.warning(f"[POMINIĘTO] {s.name}: {exc}")
-    return out
-
-
-def _analyze_sources(chosen):
-    out = []
-    for key in chosen:
-        s = sites[key]
-        try:
-            with st.spinner(f"Analizuję {s.name} (Search+Discover)…"):
-                out.append(
-                    analyze_site_sources(
-                        s,
-                        _period(cur_start, cur_end),
-                        _period(prev_start, prev_end),
-                        global_config.google_credentials_path,
-                        use_cache,
-                    )
-                )
-        except (GSCError, SitemapError) as exc:
-            st.warning(f"[POMINIĘTO] {s.name}: {exc}")
-    return out
-
-
-CAT_COLS = ["site_name", "category_path", "depth", "clicks_change", "clicks_change_pct"]
-SRC_COLS = [
-    "site_name",
-    "category_path",
-    "depth",
-    "ymyl",
-    "clicks_change",
-    "clicks_change_pct",
-]
-
-
-def render_mode1(chosen):
-    if len(chosen) != 2:
-        st.info("Wybierz dokładnie DWA serwisy.")
-        return
-    analyses = _analyze_sites(chosen)
-    if len(analyses) < 2:
-        st.error("Potrzebne dwa serwisy z danymi.")
-        return
-    a, b = analyses[0], analyses[1]
-    ta, tb = app._site_totals(a), app._site_totals(b)
-    st.subheader("SITE COMPARISON")
-    st.dataframe(
-        app._site_comparison_df(ta, tb).set_index("site_name").T,
-        use_container_width=True,
-    )
-    st.metric(
-        "Różnica dynamiki (clicks %)",
-        f"{(ta['clicks_change_pct'] - tb['clicks_change_pct']):+.1f} pp",
-    )
-    groups = app._build_group_comparisons(sites_config, a, b)
-    if groups:
-        st.subheader("CATEGORY GROUP COMPARISON")
-        gdf = app._group_comparison_df(groups)
-        st.dataframe(gdf, use_container_width=True)
-        _dl(gdf, "category_groups_comparison.csv")
-    for an in (a, b):
-        with st.expander(f"{an.site_name} – kategorie top-level"):
-            top = an.tree[an.tree["depth"] == 1].sort_values("clicks_change")
-            st.dataframe(
-                top[
-                    [
-                        "category_path",
-                        "current_clicks",
-                        "previous_clicks",
-                        "clicks_change",
-                        "clicks_change_pct",
-                    ]
-                ],
-                use_container_width=True,
-            )
-            _dl(an.tree, f"{an.site_key}_category_tree.csv")
-
-
-def render_mode2(chosen):
-    analyses = _analyze_sites(chosen)
-    if len(analyses) < 2:
-        st.error("Potrzebne co najmniej dwa serwisy z danymi.")
-        return
-    combined = app._combined_categories_df(analyses)
-    grow = combined[combined["clicks_change"] > 0].sort_values(
-        "clicks_change", ascending=False
-    ).head(20)
-    decl = combined[combined["clicks_change"] < 0].sort_values("clicks_change").head(20)
-    c1, c2 = st.columns(2)
-    c1.subheader("TOP rosnące")
-    c1.dataframe(grow[CAT_COLS], use_container_width=True)
-    c2.subheader("TOP spadające")
-    c2.dataframe(decl[CAT_COLS], use_container_width=True)
-    if not grow.empty:
-        chart = (
-            grow.head(15)
-            .assign(label=lambda d: d["site_name"] + " · " + d["category_path"])
-            .set_index("label")["clicks_change"]
-        )
-        st.bar_chart(chart)
-    _dl(combined, "categories_all_sites.csv")
-
-
-def render_mode3(chosen):
-    sources = _analyze_sources(chosen)
-    if not sources:
-        st.error("Żaden serwis nie zwrócił danych.")
-        return
-    st.subheader("SOURCE OVERVIEW")
-    ov = app._source_overview_df(sources)
-    st.dataframe(ov, use_container_width=True)
-    _dl(ov, "source_overview.csv")
-
-    st.subheader("YMYL vs non-YMYL")
-    ym = app._ymyl_summary_df(sources)
-    st.dataframe(ym, use_container_width=True)
-    _dl(ym, "ymyl_summary.csv")
-
-    st.subheader("DEVICE BREAKDOWN")
-    dev = app._device_breakdown_df(sources)
-    st.dataframe(dev, use_container_width=True)
-    _dl(dev, "device_breakdown.csv")
-
-    combined = app._combined_source_categories_df(sources)
-    tab_s, tab_d = st.tabs(["Search", "Discover"])
-    for tab, label in ((tab_s, "Search"), (tab_d, "Discover")):
-        with tab:
-            sub = combined[combined["source"] == label]
-            grow = sub[sub["clicks_change"] > 0].sort_values(
-                "clicks_change", ascending=False
-            ).head(20)
-            decl = sub[sub["clicks_change"] < 0].sort_values("clicks_change").head(20)
-            st.write("**TOP rosnące**")
-            st.dataframe(grow[SRC_COLS], use_container_width=True)
-            st.write("**TOP spadające**")
-            st.dataframe(decl[SRC_COLS], use_container_width=True)
-    _dl(combined, "categories_by_source.csv")
-
-
-M4_COLS = [
-    "category_path",
-    "depth",
-    "current_clicks",
-    "previous_clicks",
-    "clicks_change",
-    "clicks_change_pct",
-    "number_of_urls",
-    "ymyl",
-]
-
-
-def _compute_mode4(site_key, preset, sources_types):
-    """Pobiera dane dla trybu 4 i zwraca komplet wyników (bundle) lub None."""
-    if not sources_types:
-        st.info("Wybierz co najmniej jedno źródło (Search/Discover/News).")
-        return None
-    site = sites[site_key]
-    if preset == 7:
-        if not _check_periods():
-            return None
-        current, previous = _period(cur_start, cur_end), _period(prev_start, prev_end)
-    else:
-        current, previous = app._compute_preset_periods(preset)
-    try:
-        with st.spinner("Pobieram dane GSC…"):
-            results = analyze_site_multi_source(
-                site, current, previous, global_config.google_credentials_path,
-                sources_types, use_cache,
-            )
-    except (GSCError, SitemapError) as exc:
-        st.error(f"{site.name}: {exc}")
-        return None
-    return {
-        "site_key": site_key,
-        "site_name": site.name,
-        "current": current,
-        "previous": previous,
-        "sources": list(sources_types),
-        "results": results,
-    }
-
-
-def _mode4_zip(bundle) -> bytes:
-    """Buduje ZIP z osobnymi CSV (tree/pages/daily) dla każdego źródła."""
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for source_type in bundle["sources"]:
-            sa = bundle["results"][source_type]
-            zf.writestr(f"{source_type}_category_tree.csv", sa.tree.to_csv(index=False))
-            zf.writestr(f"{source_type}_pages.csv", sa.pages.to_csv(index=False))
-            if not sa.daily.empty:
-                zf.writestr(f"{source_type}_daily.csv", sa.daily.to_csv(index=False))
-    return buffer.getvalue()
-
-
-def _render_mode4(bundle):
-    current, previous = bundle["current"], bundle["previous"]
-    cd = (date.fromisoformat(current.end) - date.fromisoformat(current.start)).days + 1
-    pd_ = (date.fromisoformat(previous.end) - date.fromisoformat(previous.start)).days + 1
-    if cd != pd_:
-        st.warning(f"Okresy mają różną długość ({cd} vs {pd_} dni) – porównanie może być zaburzone.")
-    st.info(
-        f"**{bundle['site_name']}** — CURRENT {current.start}…{current.end} ({cd} dni)  "
-        f"vs  PREVIOUS {previous.start}…{previous.end} ({pd_} dni)"
-    )
-
-    st.download_button(
-        "⬇️ Pobierz WSZYSTKIE raporty (ZIP: Search + Discover + News)",
-        _mode4_zip(bundle),
-        file_name=f"{bundle['site_key']}_{current.start}_{current.end}.zip",
-        mime="application/zip",
-        type="primary",
-    )
-    st.caption("Jedno pobranie = osobne CSV dla każdego źródła (bez ponownej analizy).")
-
-    results = bundle["results"]
-    sources_types = bundle["sources"]
-    tabs = st.tabs([app.SOURCE_LABELS[t] for t in sources_types])
-    for tab, t in zip(tabs, sources_types):
-        with tab:
-            sa = results[t]
-            cur = int(sa.pages["current_clicks"].sum()) if not sa.pages.empty else 0
-            prev = int(sa.pages["previous_clicks"].sum()) if not sa.pages.empty else 0
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Current clicks", f"{cur:,}".replace(",", " "))
-            c2.metric("Previous clicks", f"{prev:,}".replace(",", " "))
-            c3.metric("Zmiana", f"{cur - prev:+,}".replace(",", " "))
-            if not sa.daily.empty:
-                st.subheader("Ruch dzień po dniu (Current vs Previous)")
-                st.line_chart(sa.daily.set_index("day")[["Current", "Previous"]])
-                st.caption("Dzień 1 = początek okresu; linie nałożone dla porównania.")
-            tree = sa.tree
-            if tree.empty:
-                st.write("(brak danych kategorii)")
-                continue
-            grow = tree[tree["clicks_change"] > 0].sort_values("clicks_change", ascending=False).head(20)
-            decl = tree[tree["clicks_change"] < 0].sort_values("clicks_change").head(20)
-            st.subheader("TOP rosnące kategorie")
-            st.dataframe(grow[M4_COLS], use_container_width=True)
-            if not grow.empty:
-                st.bar_chart(grow.head(15).set_index("category_path")["clicks_change"])
-            st.subheader("TOP spadające kategorie")
-            st.dataframe(decl[M4_COLS], use_container_width=True)
-            if not decl.empty:
-                st.bar_chart(decl.head(15).set_index("category_path")["clicks_change"])
-            _dl(tree, f"{t}_category_tree.csv")
-
-
-GROUP_DISPLAY_COLS = [
-    "site_name",
-    "status",
-    "current_clicks",
-    "previous_clicks",
-    "clicks_change",
-    "clicks_change_pct",
-    "current_impressions",
-    "previous_impressions",
-    "impressions_change_pct",
-]
-
-
-def _compute_group(preset, sources_types):
-    """Pobiera pełną analizę wszystkich serwisów dla wybranego okresu i źródeł."""
-    if not sources_types:
-        st.info("Wybierz co najmniej jedno źródło (Search/Discover/News).")
-        return None
-    if preset == 7:
-        if not _check_periods():
-            return None
-        current, previous = _period(cur_start, cur_end), _period(prev_start, prev_end)
-    else:
-        current, previous = app._compute_preset_periods(preset)
-
-    group_results = []
-    total = len(site_keys)
-    progress = st.progress(0.0, text="Pobieram dane serwisów…")
-    for i, key in enumerate(site_keys):
-        s = sites[key]
-        progress.progress(i / total, text=f"Analizuję {s.name}… ({i + 1}/{total})")
-        try:
-            results = analyze_site_multi_source(
-                s, current, previous, global_config.google_credentials_path,
-                sources_types, use_cache,
-            )
-            has_data = any(
-                not results[t].pages.empty for t in sources_types if t in results
-            )
-            group_results.append({
-                "site_key": key,
-                "site_name": s.name,
-                "results": results,
-                "status": "ok" if has_data else "no_data",
-                "error": None,
-            })
-        except (GSCError, SitemapError) as exc:
-            group_results.append({
-                "site_key": key,
-                "site_name": s.name,
-                "results": {},
-                "status": "error",
-                "error": str(exc),
-            })
-    progress.progress(1.0, text="Gotowe.")
-    progress.empty()
-    return {
-        "current": current,
-        "previous": previous,
-        "sources": list(sources_types),
-        "group_results": group_results,
-    }
-
-
-def _render_group(bundle):
-    current, previous = bundle["current"], bundle["previous"]
-    sources_types = bundle["sources"]
-    group_results = bundle["group_results"]
-    cd = (date.fromisoformat(current.end) - date.fromisoformat(current.start)).days + 1
-    pd_ = (date.fromisoformat(previous.end) - date.fromisoformat(previous.start)).days + 1
-    labels_src = ", ".join(app.SOURCE_LABELS[t] for t in sources_types)
-    st.info(
-        f"**Grupa: {len(group_results)} serwisów** — źródła: {labels_src}\n\n"
-        f"CURRENT {current.start}…{current.end} ({cd} dni)  vs  "
-        f"PREVIOUS {previous.start}…{previous.end} ({pd_} dni)"
-    )
-
-    for entry in group_results:
-        if entry["status"] == "error":
-            st.warning(f"[BŁĄD] {entry['site_name']}: {entry['error']}")
-        elif entry["status"] == "no_data":
-            st.caption(f"ℹ️ {entry['site_name']}: brak danych dla wybranego okresu/źródeł.")
-
-    overview = app._group_overview_df(group_results, sources_types)
-    if overview.empty:
-        st.error("Brak danych do pokazania.")
-        return
-
-    tot_cur = float(overview["current_clicks"].sum())
-    tot_prev = float(overview["previous_clicks"].sum())
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Grupa — Current clicks", f"{int(tot_cur):,}".replace(",", " "))
-    c2.metric("Grupa — Previous clicks", f"{int(tot_prev):,}".replace(",", " "))
-    c3.metric("Zmiana", f"{int(tot_cur - tot_prev):+,}".replace(",", " "))
-
-    st.subheader("Przegląd grupy — zmiana ruchu per serwis")
-    st.caption("Sortowanie: największe spadki na górze. Kolumny można klikać, by sortować.")
-    st.dataframe(overview[GROUP_DISPLAY_COLS], use_container_width=True, hide_index=True)
-    _dl(overview, "group_overview.csv")
-
-    ranked = overview[overview["status"] == "ok"]
-    if not ranked.empty:
-        st.subheader("Zmiana klików per serwis")
-        st.bar_chart(ranked.set_index("site_name")["clicks_change"])
-
-    daily = app._group_daily_by_date_df(group_results, sources_types)
-    if not daily.empty:
-        st.subheader("Ruch dzienny — wszystkie serwisy (okres bieżący)")
-        st.caption("Oś X = kalendarzowa data okresu bieżącego; jedna linia na serwis.")
-        st.line_chart(daily)
-
-    st.subheader("Szczegóły serwisu (wykres + kategorie zysk/strata)")
-    ok_entries = [e for e in group_results if e["status"] != "error"]
-    if not ok_entries:
-        st.info("Brak serwisów z danymi do szczegółowej analizy.")
-        return
-    labels = {e["site_key"]: e["site_name"] for e in ok_entries}
-    chosen = st.selectbox(
-        "Wybierz serwis", list(labels.keys()),
-        format_func=lambda k: labels[k], key="m6_drill",
-    )
-    entry = next(e for e in ok_entries if e["site_key"] == chosen)
-    drill_bundle = {
-        "site_key": entry["site_key"],
-        "site_name": entry["site_name"],
-        "current": current,
-        "previous": previous,
-        "sources": [t for t in sources_types if t in entry["results"]],
-        "results": entry["results"],
-    }
-    _render_mode4(drill_bundle)
-
-
-def _parse_urls(pasted, uploaded):
-    text = pasted or ""
+def _url_controls(sites):
+    pasted = st.text_area("Adresy URL", key="url_input", height=140)
+    uploaded = st.file_uploader("Plik z adresami", type=["txt", "csv"], key="url_file")
+    text = pasted
     if uploaded is not None:
-        try:
-            text += "\n" + uploaded.getvalue().decode("utf-8", errors="ignore")
-        except Exception:
-            pass
-    found = re.findall(r"https?://\S+", text)
-    cleaned = [u.strip().strip('",;)') for u in found]
-    return list(dict.fromkeys(cleaned))
-
-
-def _compute_mode5(site_key, urls, sources_types, compare):
-    site = sites[site_key]
-    cred = global_config.google_credentials_path
-    current = _period(cur_start, cur_end)
-    previous = _period(prev_start, prev_end) if compare else None
-    results = {}
-    totals = {}
-    for t in sources_types:
-        try:
-            with st.spinner(f"Pobieram {app.SOURCE_LABELS[t]}…"):
-                cur_df = get_gsc_data(
-                    current.start, current.end, site.gsc_property, cred,
-                    dimensions=("page",), search_type=t, use_cache=use_cache,
-                )
-                prev_df = None
-                if compare:
-                    prev_df = get_gsc_data(
-                        previous.start, previous.end, site.gsc_property, cred,
-                        dimensions=("page",), search_type=t, use_cache=use_cache,
-                    )
-        except GSCError as exc:
-            st.warning(f"{site.name} [{app.SOURCE_LABELS[t]}]: {exc}")
-            continue
-        results[t] = build_url_metrics(urls, cur_df, prev_df, with_position=(t == "web"))
-        # Suma całego serwisu w okresie – do policzenia udziału %.
-        totals[t] = {
-            "clicks": float(cur_df["clicks"].sum()) if not cur_df.empty else 0.0,
-            "impressions": float(cur_df["impressions"].sum()) if not cur_df.empty else 0.0,
-        }
-    if not results:
-        return None
-    return {
-        "site_key": site_key,
-        "site_name": site.name,
-        "current": current,
-        "previous": previous,
-        "sources": list(sources_types),
-        "results": results,
-        "totals": totals,
-    }
-
-
-def _render_mode5_results(bundle):
-    cur, prev = bundle["current"], bundle["previous"]
-    period_txt = f"CURRENT {cur.start}…{cur.end}"
-    if prev:
-        period_txt += f"  vs PREVIOUS {prev.start}…{prev.end}"
-    st.info(f"**{bundle['site_name']}** — {period_txt}")
-
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for t, df in bundle["results"].items():
-            zf.writestr(f"{t}_urls.csv", df.to_csv(index=False))
-    st.download_button(
-        "⬇️ Pobierz WSZYSTKIE (ZIP)", buffer.getvalue(),
-        file_name=f"{bundle['site_key']}_urls.zip", mime="application/zip", type="primary",
-    )
-
-    tabs = st.tabs([app.SOURCE_LABELS[t] for t in bundle["sources"]])
-    for tab, t in zip(tabs, bundle["sources"]):
-        with tab:
-            df = bundle["results"][t]
-            found = int((df["current_clicks"] > 0).sum())
-            st.caption(f"{len(df)} URL-i · z ruchem w bieżącym okresie: {found}")
-            st.dataframe(df, use_container_width=True)
-            _dl(df, f"{t}_urls.csv")
-            _render_mode5_summary(df, bundle["totals"].get(t, {}))
-
-
-def _render_mode5_summary(df, totals):
-    """Podsumowanie pod tabelą: sumy clicks/impressions, średni CTR i udział %."""
-    import math
-
-    sel_clicks = float(df["current_clicks"].sum())
-    sel_impr = float(df["current_impressions"].sum())
-    mean_ctr = df["current_ctr"].mean() if "current_ctr" in df.columns else math.nan
-    total_clicks = totals.get("clicks", 0.0)
-    total_impr = totals.get("impressions", 0.0)
-    pct_clicks = (sel_clicks / total_clicks * 100.0) if total_clicks else math.nan
-    pct_impr = (sel_impr / total_impr * 100.0) if total_impr else math.nan
-
-    def _num(v):
-        return f"{int(v):,}".replace(",", " ")
-
-    def _pct(v):
-        return "—" if math.isnan(v) else f"{v:.1f}% całości"
-
-    st.markdown("**Podsumowanie (wybrane URL-e)**")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Suma clicks", _num(sel_clicks), _pct(pct_clicks))
-    c2.metric("Suma impressions", _num(sel_impr), _pct(pct_impr))
-    c3.metric(
-        "Średni CTR",
-        "—" if (isinstance(mean_ctr, float) and math.isnan(mean_ctr)) else f"{mean_ctr * 100:.2f}%",
-    )
-    st.caption(
-        f"Cały serwis w okresie: {_num(total_clicks)} clicks · {_num(total_impr)} impressions."
-    )
-
-
-def render_mode5():
-    st.subheader("Lista URL-i → dane GSC")
-    pasted = st.text_area("Wklej URL-e (jeden na linię)", height=160, key="m5_text")
-    uploaded = st.file_uploader("albo wgraj plik .txt/.csv", type=["txt", "csv"], key="m5_file")
-    urls = _parse_urls(pasted, uploaded)
-    st.caption(f"Wczytano {len(urls)} unikalnych URL-i.")
-    if run:
-        if not url_sources:
-            st.warning("Wybierz co najmniej jedno źródło.")
-        elif not urls:
-            st.warning("Wklej albo wgraj listę URL-i.")
-        elif _check_periods():
-            bundle = _compute_mode5(single_site, urls, url_sources, compare_urls)
-            if bundle:
-                st.session_state["m5_bundle"] = bundle
-    saved = st.session_state.get("m5_bundle")
-    if saved:
-        _render_mode5_results(saved)
-
-
-MODE_DESCRIPTIONS = {
-    "1": (
-        "**Tryb 1 — Porównaj DWA serwisy.** Szczegółowe porównanie dwóch domen "
-        "w tych samych okresach: tabela SITE COMPARISON, różnica dynamiki (pp), "
-        "porównanie grup kategorii, kategorie top-level każdej domeny.\n\n"
-        "➡️ Wybierz **dokładnie 2 serwisy** oraz okresy CURRENT i PREVIOUS, kliknij "
-        "**Uruchom analizę**."
-    ),
-    "2": (
-        "**Tryb 2 — Ranking kategorii (wiele serwisów).** Wspólna lista kategorii "
-        "ze wszystkich wybranych domen, posortowana po zmianie klików — od razu "
-        "widać, które kategorie najbardziej urosły i spadły.\n\n"
-        "➡️ Wybierz **2+ serwisy** i dwa okresy, kliknij **Uruchom analizę**."
-    ),
-    "3": (
-        "**Tryb 3 — Search vs Discover + YMYL.** Rozdziela ruch z Search (web) i "
-        "Discover, rozbija po urządzeniach (mobile/desktop) i dzieli kategorie na "
-        "YMYL vs non-YMYL (finanse/polityka/zdrowie kontra reszta).\n\n"
-        "➡️ Wybierz **2+ serwisy** i dwa okresy, kliknij **Uruchom analizę**."
-    ),
-    "4": (
-        "**Tryb 4 — Jeden serwis po kategoriach.** Analiza jednej domeny: które "
-        "kategorie urosły/spadły, ile mają URL-i, wykres ruchu dzień po dniu. "
-        "Osobno **Search / Discover / News**. Gotowe presety dat (tydzień, miesiąc, "
-        "rok do roku) lub własny zakres.\n\n"
-        "➡️ Wybierz **serwis**, **okres** (preset albo Własne daty) i **źródła**, "
-        "kliknij **Uruchom analizę**. Wyniki pobierzesz jednym ZIP-em."
-    ),
-    "5": (
-        "**Tryb 5 — Lista URL-i → dane.** Wklej lub wgraj listę adresów i dostań dla "
-        "nich **clicks, impressions, CTR i pozycję** (pozycja tylko dla Search). "
-        "Opcjonalnie porównanie dwóch okresów. Pod tabelą sumy, średni CTR i udział "
-        "% w całym ruchu serwisu.\n\n"
-        "➡️ Wybierz **serwis** i **źródła**, ustaw okres (lub zaznacz „Porównaj dwa "
-        "okresy”), wklej/wgraj URL-e, kliknij **Uruchom analizę**."
-    ),
-    "6": (
-        "**Tryb 6 — Grupa: przegląd wszystkich serwisów.** Pobiera naraz wszystkie "
-        "serwisy z grupy i pokazuje zbiorczy obraz: tabelę zmian klików/wyświetleń "
-        "per serwis (kto rośnie, kto traci), słupki zmiany oraz wielolinowy wykres "
-        "dzienny (oś X = data) dla wszystkich domen. Po wybraniu serwisu wchodzisz w "
-        "jego szczegóły: wykres dzień po dniu i kategorie, które zyskują/tracą.\n\n"
-        "➡️ Wybierz **okres** (preset albo Własne daty) i **źródła**, kliknij "
-        "**Uruchom analizę**. Pierwsze pobranie jest wolniejsze (7 serwisów), kolejne "
-        "idą z cache."
-    ),
-}
-
-with st.expander("ℹ️ Jak używać — opis wszystkich trybów", expanded=False):
-    for _key in ("1", "2", "3", "4", "5", "6"):
-        st.markdown(MODE_DESCRIPTIONS[_key])
-        st.markdown("---")
-
-st.info(MODE_DESCRIPTIONS.get(mode[0], ""))
-
-
-if mode.startswith("4"):
-    if run:
-        bundle = _compute_mode4(single_site, preset_id, sources_sel)
-        if bundle is not None:
-            st.session_state["m4_bundle"] = bundle
-    saved = st.session_state.get("m4_bundle")
-    if saved:
-        _render_mode4(saved)
-    else:
-        st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
-elif mode.startswith("6"):
-    if run:
-        bundle = _compute_group(preset_id, sources_sel)
-        if bundle is not None:
-            st.session_state["m6_bundle"] = bundle
-    saved = st.session_state.get("m6_bundle")
-    if saved:
-        _render_group(saved)
-    else:
-        st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
-elif mode.startswith("5"):
-    render_mode5()
-elif run:
-    if not selected:
-        st.info("Wybierz serwisy w panelu po lewej.")
-    elif _check_periods():
-        if mode.startswith("1"):
-            render_mode1(selected)
-        elif mode.startswith("2"):
-            render_mode2(selected)
+        text += "\n" + uploaded.getvalue().decode("utf-8-sig", errors="replace")
+    urls = parse_urls(text)
+    assignments, unresolved, rows = [], [], []
+    for url in urls:
+        candidates = url_candidates(url, sites)
+        owner = candidates[0] if len(candidates) == 1 else None
+        if len(candidates) > 1:
+            owner = st.selectbox(
+                f"Serwis dla {url}", [None] + candidates,
+                format_func=lambda key: "Wybierz przypisanie" if key is None else f"{sites[key].name} ({key})",
+                key="url_owner:" + hashlib.sha256(url.encode()).hexdigest(),
+            )
+        if owner is not None:
+            assignments.append((url, owner))
         else:
-            render_mode3(selected)
-else:
-    st.info("Ustaw parametry po lewej i kliknij **Uruchom analizę**.")
+            unresolved.append(url)
+        rows.append({"url": url, "site_name": sites[owner].name if owner else "Nieprzypisany", "status": "OK" if owner else "Niejednoznaczny" if candidates else "Poza wybranymi serwisami"})
+    if rows:
+        _table(pd.DataFrame(rows), "Przypisanie URL-i", "url_assignments.csv")
+    return tuple(assignments), urls, unresolved
+
+
+def _table(frame, title, filename):
+    st.subheader(title)
+    if frame.empty:
+        st.caption("Brak danych.")
+        return
+    frame = frame.dropna(axis=1, how="all")
+    front = [column for column in IDENTITY if column in frame]
+    frame = frame[front + [column for column in frame if column not in front]].copy()
+    if "source" in frame:
+        frame["source"] = frame["source"].replace(SOURCE_LABELS)
+    if "period" in frame:
+        frame["period"] = frame["period"].replace({"current": "Bieżący", "previous": "Poprzedni"})
+    st.dataframe(frame, hide_index=True, use_container_width=True, column_config={column: COLUMN_LABELS.get(column, column) for column in frame})
+    st.download_button("Pobierz CSV", frame.to_csv(index=False).encode("utf-8-sig"), file_name=filename, mime="text/csv", key="download:" + filename)
+
+
+def _chart(daily, request, sites, metric, show_sum, show_previous):
+    if daily.empty:
+        return
+    data = daily.groupby(["site_key", "period", "date", "day"], as_index=False, sort=False)[metric].sum(min_count=1)
+    if not show_previous:
+        data = data[data["period"] == "current"].copy()
+    data = data.dropna(subset=[metric])
+    if data.empty:
+        return
+    labels = {key: f"{sites[key].name} ({key})" for key in request.site_keys}
+    data["Serwis"] = data["site_key"].map(labels)
+    if show_sum:
+        summed = data.groupby(["period", "date", "day"], as_index=False)[metric].sum(min_count=1)
+        summed["Serwis"] = "Suma serwisów"
+        data = pd.concat([data, summed], ignore_index=True)
+    data["Data"] = pd.to_datetime(data["date"])
+    data["Oś czasu"] = pd.Timestamp(request.current.start) + pd.to_timedelta(data["day"] - 1, unit="D")
+    data["Okres"] = data["period"].replace({"current": "Bieżący", "previous": "Poprzedni"})
+    domain = list(labels.values()) + (["Suma serwisów"] if show_sum else [])
+    colors = [COLORS[list(sites).index(key) % len(COLORS)] for key in request.site_keys] + (["#8b8b8b"] if show_sum else [])
+    metric_label = "Kliknięcia" if metric == "clicks" else "Wyświetlenia"
+    chart = alt.Chart(data).mark_line().encode(
+        x=alt.X("Oś czasu:T", title="Data"),
+        y=alt.Y(f"{metric}:Q", title=metric_label),
+        color=alt.Color("Serwis:N", scale=alt.Scale(domain=domain, range=colors), legend=alt.Legend(orient="bottom")),
+        strokeDash=alt.StrokeDash("Okres:N", scale=alt.Scale(domain=["Bieżący", "Poprzedni"], range=[[1, 0], [6, 4]]), legend=alt.Legend(orient="bottom")),
+        tooltip=["Serwis:N", "Okres:N", alt.Tooltip("Data:T", format="%Y-%m-%d"), alt.Tooltip(f"{metric}:Q", title=metric_label, format=",.0f")],
+    ).properties(height=340)
+    st.altair_chart(chart, use_container_width=True)
+    if show_previous:
+        st.caption("Poprzedni okres wyrównany po numerze dnia. Dymek pokazuje jego rzeczywistą datę.")
+
+
+def _kpis(daily, has_previous):
+    if daily.empty:
+        return
+    current = daily[daily["period"] == "current"]
+    previous = daily[daily["period"] == "previous"]
+    columns = st.columns(2)
+    for column, metric, label in zip(columns, ("clicks", "impressions"), ("Kliknięcia", "Wyświetlenia")):
+        value = current[metric].sum(min_count=1)
+        if pd.isna(value):
+            continue
+        delta = None
+        if has_previous:
+            before = previous[metric].sum(min_count=1)
+            if pd.notna(before):
+                delta = f"{value - before:+,.0f}".replace(",", " ")
+                if before:
+                    delta += f" ({(value - before) / before * 100:+.1f}%)"
+        column.metric(label, f"{value:,.0f}".replace(",", " "), delta)
+
+
+def _category_details(bundle, selected_sources, sites_config, suffix):
+    request = bundle["request"]
+    pages = select_sources(bundle["pages"], selected_sources)
+    trees = select_sources(bundle["trees"], selected_sources)
+    if pages.empty:
+        return
+    if suffix == "total":
+        pages = combine_sources(pages, ["site_key", "site_name", "page", "category_path"])
+        frames = []
+        for key in request.site_keys:
+            subset = pages[pages["site_key"] == key]
+            if not subset.empty:
+                site = sites_config.sites[key]
+                tree = tag_ymyl(build_category_tree(subset), site.ymyl_paths, site.ymyl_exclude_paths)
+                frames.append(tree.assign(site_key=key, site_name=site.name))
+        trees = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not trees.empty:
+        metric = "clicks_change"
+        _table(trees[trees[metric] > 0].sort_values(metric, ascending=False).head(20), "Kategorie rosnące", f"{suffix}_growing.csv")
+        _table(trees[trees[metric] < 0].sort_values(metric).head(20), "Kategorie spadające", f"{suffix}_declining.csv")
+        _table(trees, "Wszystkie kategorie", f"{suffix}_categories.csv")
+    _table(pages, "Wszystkie URL-e", f"{suffix}_pages.csv")
+    ymyl_frames = []
+    for key in request.site_keys:
+        subset = pages[pages["site_key"] == key]
+        if subset.empty:
+            continue
+        site = sites_config.sites[key]
+        tagged = tag_ymyl(subset, site.ymyl_paths, site.ymyl_exclude_paths)
+        grouped = combine_sources(tagged, ["site_key", "site_name", "ymyl"] + (["source"] if "source" in tagged else []))
+        ymyl_frames.append(grouped)
+    if ymyl_frames:
+        _table(pd.concat(ymyl_frames, ignore_index=True), "YMYL i pozostałe treści", f"{suffix}_ymyl.csv")
+    if "web" in selected_sources:
+        _table(select_sources(bundle["devices"], ("web",)), "Urządzenia — Search", f"{suffix}_devices.csv")
+    if len(request.site_keys) == 2:
+        pair = []
+        for key in request.site_keys:
+            tree = trees[trees["site_key"] == key]
+            if tree.empty:
+                break
+            pair.append(SimpleNamespace(site_key=key, site_name=sites_config.sites[key].name, tree=tree))
+        if len(pair) == 2:
+            groups = app._build_group_comparisons(sites_config, *pair)
+            if groups:
+                _table(app._group_comparison_df(groups), "Porównanie grup kategorii", f"{suffix}_groups.csv")
+
+
+def _url_details(bundle, selected_sources, suffix):
+    pages = select_sources(bundle["pages"], selected_sources).dropna(axis=1, how="all")
+    if pages.empty:
+        return
+    if suffix == "total":
+        pages = combine_sources(pages, ["site_key", "site_name", "url"])
+    _table(pages, "Metryki URL-i", f"{suffix}_urls.csv")
+    totals = select_sources(bundle["totals"], selected_sources)
+    if not totals.empty:
+        selected = pages.groupby(["site_key", "site_name"], as_index=False)[["current_clicks", "current_impressions"]].sum()
+        whole = totals[totals["period"] == "current"].groupby("site_key")[["clicks", "impressions"]].sum()
+        summary = selected.join(whole, on="site_key")
+        for metric in ("clicks", "impressions"):
+            summary[f"share_{metric}_pct"] = (summary[f"current_{metric}"] / summary[metric] * 100).where(summary[metric] != 0)
+        summary["current_ctr"] = (summary["current_clicks"] / summary["current_impressions"]).where(summary["current_impressions"] != 0)
+        _table(summary, "Udział wskazanych URL-i w ruchu serwisów", f"{suffix}_url_share.csv")
+
+
+def _daily_details(daily, threshold, suffix):
+    current = daily[daily["period"] == "current"].set_index(IDENTITY + ["day"])
+    previous = daily[daily["period"] == "previous"].set_index(IDENTITY + ["day"])
+    if not previous.empty:
+        aligned = current[["date", "clicks", "impressions"]].add_prefix("current_").join(previous[["date", "clicks", "impressions"]].add_prefix("previous_"), how="outer")
+        aligned["clicks_change"] = aligned["current_clicks"].fillna(0) - aligned["previous_clicks"].fillna(0)
+        aligned["clicks_change_pct"] = (aligned["clicks_change"] / aligned["previous_clicks"] * 100).where(aligned["previous_clicks"] != 0)
+        anomalies = aligned[(aligned["clicks_change_pct"].abs() >= threshold) | ((aligned["previous_clicks"] == 0) & (aligned["current_clicks"] > 0))]
+        _table(anomalies.reset_index(), f"Odchylenia dzienne ≥ {threshold}% lub wzrost od zera", f"{suffix}_anomalies.csv")
+    _table(daily, "Dane dzienne wszystkich serwisów", f"{suffix}_daily.csv")
+
+
+def _download_bundle(bundle):
+    buffer = io.BytesIO()
+    request = bundle["request"]
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name in ("daily", "pages", "trees", "devices", "totals", "statuses"):
+            archive.writestr(f"{name}.csv", bundle[name].to_csv(index=False).encode("utf-8-sig"))
+        metadata = pd.DataFrame([{
+            "view": request.view, "sites": ",".join(request.site_keys), "sources": ",".join(request.sources),
+            "current_start": request.current.start, "current_end": request.current.end,
+            "previous_start": request.previous.start if request.previous else "",
+            "previous_end": request.previous.end if request.previous else "",
+        }])
+        archive.writestr("parameters.csv", metadata.to_csv(index=False).encode("utf-8-sig"))
+    st.download_button("Pobierz wszystkie wyniki (ZIP)", buffer.getvalue(), "gsc_dashboard.zip", "application/zip")
+
+
+def _render_results(bundle, sites_config, threshold):
+    request = bundle["request"]
+    for notice in bundle["notices"]:
+        st.warning(notice)
+    statuses = bundle["statuses"]
+    for row in statuses.itertuples():
+        if row.status not in ("ok", "no_data"):
+            st.warning(f"{row.site_name} / {SOURCE_LABELS[row.source]}: {row.error}")
+    _download_bundle(bundle)
+    if bundle["daily"].empty:
+        st.info("Brak danych dla wybranych serwisów i źródeł.")
+        _table(statuses, "Status pobierania", "statuses.csv")
+        return
+    controls = st.columns(3)
+    show_sum = controls[0].checkbox("Suma serwisów", key=request.view + ":show_sum")
+    show_previous = controls[1].checkbox("Pokaż poprzedni okres", key=request.view + ":show_previous") if request.previous else False
+    metric = "clicks"
+    if request.view in (VIEWS[0], VIEWS[3]):
+        metric = "impressions" if controls[2].radio("Metryka", ["Kliknięcia", "Wyświetlenia"], horizontal=True, key=request.view + ":metric") == "Wyświetlenia" else "clicks"
+    if properties_overlap({key: sites_config.sites[key] for key in request.site_keys}):
+        st.warning("Zakresy wybranych properties nakładają się. Suma może liczyć część ruchu więcej niż raz.")
+    if request.view == VIEWS[2]:
+        tabs, subsets = [st.container()], [("brand", ("web",))]
+        _table(pd.DataFrame([{"site_name": sites_config.sites[key].name, "frazy": ", ".join(sites_config.sites[key].brand_terms)} for key in request.site_keys]), "Frazy brandowe", "brand_terms.csv")
+    else:
+        subsets = [("total", request.sources)] + [(source, (source,)) for source in request.sources]
+        tabs = st.tabs(["Łącznie"] + [SOURCE_LABELS[source] for source in request.sources])
+    for tab, (suffix, sources) in zip(tabs, subsets):
+        with tab:
+            status_subset = select_sources(statuses, sources)
+            if (~status_subset["status"].isin(["ok", "no_data"])).any():
+                st.warning("Wyniki częściowe. Podsumowania i suma obejmują tylko poprawnie pobrane dane.")
+            daily = select_sources(bundle["daily"], sources)
+            if daily.empty:
+                st.info("Brak danych dla tego źródła.")
+                continue
+            _kpis(daily, request.previous is not None)
+            st.subheader("Ruch wskazanych URL-i" if request.view == VIEWS[3] else "Kliknięcia brandowe" if request.view == VIEWS[2] else "Ruch wybranych serwisów")
+            _chart(daily, request, sites_config.sites, metric, show_sum, show_previous)
+            overview = daily_overview(daily)
+            if suffix == "total":
+                overview = combine_sources(overview, ["site_key", "site_name"])
+            _table(overview, "Podsumowanie serwisów", f"{suffix}_overview.csv")
+            if request.previous and len(request.site_keys) == 2 and suffix == "total":
+                pair = overview.set_index("site_key").reindex(request.site_keys)
+                dynamics = pair["clicks_change_pct"]
+                if dynamics.notna().all():
+                    st.metric("Różnica dynamiki kliknięć", f"{dynamics.iloc[0] - dynamics.iloc[1]:+.1f} pp")
+            if request.view == VIEWS[0]:
+                _daily_details(daily, threshold, suffix)
+            elif request.view == VIEWS[1]:
+                _category_details(bundle, sources, sites_config, suffix)
+            elif request.view == VIEWS[3]:
+                _url_details(bundle, sources, suffix)
+            else:
+                _table(daily, "Dane dzienne wszystkich serwisów", "brand_daily.csv")
+    _table(statuses, "Status pobierania", "statuses.csv")
+
+
+def main():
+    st.set_page_config(page_title="Artemida", layout="wide")
+    st.title("Artemida")
+    for key in ("GOOGLE_CREDENTIALS_JSON", "SITES_YAML", "APP_PASSWORD"):
+        try:
+            if key in st.secrets:
+                os.environ[key] = str(st.secrets[key])
+        except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
+            pass
+    _password_gate()
+    try:
+        global_config, sites_config = load_global_config(), load_sites()
+    except ConfigError as exc:
+        st.error(str(exc))
+        return
+    sites = sites_config.sites
+    view = st.sidebar.radio("Widok", VIEWS, key="view")
+    actions = st.sidebar.columns(2)
+    actions[0].button("Wszystkie", on_click=_set_sites, args=(tuple(sites),))
+    actions[1].button("Wyczyść", on_click=_set_sites, args=((),))
+    selected = st.sidebar.multiselect("Serwisy", list(sites), format_func=lambda key: sites[key].name, key="selected_sites")
+    selected = tuple(key for key in sites if key in selected)
+    if view == VIEWS[2]:
+        sources = ("web",)
+    else:
+        if "selected_sources" not in st.session_state:
+            st.session_state["selected_sources"] = st.session_state.get("preferred_sources", ["web"])
+        sources = tuple(st.sidebar.multiselect("Źródła", list(SOURCE_LABELS), format_func=SOURCE_LABELS.get, key="selected_sources"))
+        st.session_state["preferred_sources"] = list(sources)
+    preference_prefix = "settings:" + view + ":"
+    for key, value in st.session_state.get("period_preferences", {}).items():
+        if key.startswith(preference_prefix) and key not in st.session_state:
+            st.session_state[key] = value
+    current, previous = _period_controls(view)
+    preferences = dict(st.session_state.get("period_preferences", {}))
+    preferences.update({key: value for key, value in st.session_state.items() if key.startswith(preference_prefix)})
+    st.session_state["period_preferences"] = preferences
+    st.sidebar.caption(f"Bieżący: {current.start} — {current.end}")
+    if previous:
+        st.sidebar.caption(f"Poprzedni: {previous.start} — {previous.end}")
+    threshold = st.sidebar.slider("Próg dziennego odchylenia (%)", 10, 200, 30, step=10) if view == VIEWS[0] else 30
+    with st.sidebar.expander("Zaawansowane"):
+        use_cache = st.checkbox("Użyj cache", value=True, key="use_cache")
+    st.header(view)
+    assignments, urls, unresolved = (), [], []
+    if view == VIEWS[3]:
+        assignments, urls, unresolved = _url_controls({key: sites[key] for key in selected})
+    valid_dates = current.start <= current.end and (previous is None or previous.start <= previous.end)
+    if not valid_dates:
+        st.error("Data początkowa nie może być późniejsza niż końcowa.")
+    if previous and (pd.Timestamp(current.end) - pd.Timestamp(current.start)) != (pd.Timestamp(previous.end) - pd.Timestamp(previous.start)):
+        st.warning("Okresy mają różną długość. Porównanie obejmuje wszystkie dni obu okresów.")
+    valid = bool(selected and sources and valid_dates and (view != VIEWS[3] or (urls and not unresolved)))
+    run = st.sidebar.button("Uruchom analizę", type="primary", disabled=not valid)
+    request = AnalysisRequest(view, selected, sources, current, previous, assignments, use_cache)
+    if run:
+        progress = st.progress(0.0, text="Pobieranie danych")
+        try:
+            bundle = collect_dashboard(request, sites, global_config.google_credentials_path, lambda fraction, name: progress.progress(fraction, text=name))
+            st.session_state["result:" + view] = bundle
+        finally:
+            progress.empty()
+    saved = st.session_state.get("result:" + view)
+    if saved and saved["request"] == request:
+        _render_results(saved, sites_config, threshold)
+    elif saved:
+        st.info("Parametry zostały zmienione. Wyniki wymagają ponownego uruchomienia analizy.")
+    elif not selected:
+        st.info("Nie wybrano serwisów.")
+    elif not sources:
+        st.info("Nie wybrano źródeł.")
+    elif view == VIEWS[3] and unresolved:
+        st.warning("Część URL-i nie ma jednoznacznego przypisania do wybranych serwisów.")
+
+
+if __name__ == "__main__":
+    main()

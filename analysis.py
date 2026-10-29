@@ -6,6 +6,7 @@ Pipeline jest identyczny jak w analizie jednodomenowej (Etap 1/1.5).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -216,6 +217,120 @@ def _daily_by_date(current_df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def _brand_query_regex(terms: list[str]) -> str | None:
+    """Buduje RE2 z literalnych fraz brandowych; dopasowanie jest substringiem."""
+    escaped = [re.escape(term.strip()).replace(r"\ ", " ") for term in terms if term.strip()]
+    return f"(?i).*(?:{'|'.join(escaped)}).*" if escaped else None
+
+
+def _complete_daily_period(df: pd.DataFrame, period: Period) -> pd.DataFrame:
+    """Uzupełnia brakujące daty zerami, co jest istotne dla filtrowanych zapytań."""
+    dates = pd.date_range(period.start, period.end, freq="D").strftime("%Y-%m-%d")
+    if df.empty or "date" not in df.columns:
+        return pd.DataFrame({"date": dates, "clicks": 0.0})
+    daily = df.groupby("date")["clicks"].sum()
+    return (
+        daily.reindex(dates, fill_value=0)
+        .rename("clicks")
+        .rename_axis("date")
+        .reset_index()
+    )
+
+
+def analyze_branded_search(
+    site_config: SiteConfig,
+    current_period: Period,
+    previous_period: Period,
+    credentials_path: str,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Returns daily Search clicks for configured brand queries, aligned by day."""
+    query_filter = _brand_query_regex(site_config.brand_terms)
+    if not query_filter:
+        return pd.DataFrame(columns=["day", "Current", "Previous"])
+
+    current = _branded_daily_data(site_config, current_period, credentials_path, use_cache)
+    previous = _branded_daily_data(site_config, previous_period, credentials_path, use_cache)
+    return _daily_series(
+        current,
+        previous,
+    )
+
+
+def _branded_daily_data(
+    site_config: SiteConfig,
+    period: Period,
+    credentials_path: str,
+    use_cache: bool,
+) -> pd.DataFrame:
+    query_filter = _brand_query_regex(site_config.brand_terms)
+    if not query_filter:
+        return _complete_daily_period(pd.DataFrame(), period)
+    data = get_gsc_data(
+        period.start,
+        period.end,
+        site_config.gsc_property,
+        credentials_path,
+        dimensions=("date",),
+        search_type="web",
+        use_cache=use_cache,
+        query_filter=query_filter,
+    )
+    return _complete_daily_period(data, period)
+
+
+def analyze_branded_search_period(
+    site_config: SiteConfig,
+    period: Period,
+    credentials_path: str,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Returns daily branded Search clicks for one calendar date range."""
+    return _branded_daily_data(site_config, period, credentials_path, use_cache)
+
+
+def branded_search_export_frame(
+    results: dict[str, dict], sites: dict[str, SiteConfig]
+) -> pd.DataFrame:
+    """Normalizes branded chart results to rows suitable for a combined CSV."""
+    columns = [
+        "site_key",
+        "site_name",
+        "date",
+        "day",
+        "current_period_start",
+        "current_period_end",
+        "previous_period_start",
+        "previous_period_end",
+        "current_clicks",
+        "previous_clicks",
+    ]
+    rows = []
+    for site_key, result in results.items():
+        site = sites[site_key]
+        current = result["current"]
+        previous = result["previous"]
+        daily = result["daily"]
+        for _, point in daily.iterrows():
+            rows.append(
+                {
+                    "site_key": site_key,
+                    "site_name": site.name,
+                    "date": point.get("date"),
+                    "day": point.get("day"),
+                    "current_period_start": current.start,
+                    "current_period_end": current.end,
+                    "previous_period_start": previous.start if previous else None,
+                    "previous_period_end": previous.end if previous else None,
+                    "current_clicks": (
+                        point.get("Current") if previous else point.get("clicks")
+                    ),
+                    "previous_clicks": point.get("Previous") if previous else None,
+                }
+            )
+    return pd.DataFrame(rows, columns=columns)
+
+
 def analyze_source(
     site_config: SiteConfig,
     current_period: Period,
@@ -400,6 +515,72 @@ def analyze_site_multi_source(
             use_cache,
             with_timeseries=True,
         )
+    return results
+
+
+def analyze_site_daily_sources(
+    site_config: SiteConfig,
+    current_period: Period,
+    previous_period: Period,
+    credentials_path: str,
+    search_types: list[str],
+    use_cache: bool = True,
+) -> dict[str, pd.DataFrame]:
+    """Pobiera dzienne metryki GSC bez sitemap i wyrównuje okresy po dniu."""
+    results: dict[str, pd.DataFrame] = {}
+    for search_type in search_types:
+        current_raw = get_gsc_data(
+            current_period.start,
+            current_period.end,
+            site_config.gsc_property,
+            credentials_path,
+            dimensions=("date",),
+            search_type=search_type,
+            use_cache=use_cache,
+        )
+        previous_raw = get_gsc_data(
+            previous_period.start,
+            previous_period.end,
+            site_config.gsc_property,
+            credentials_path,
+            dimensions=("date",),
+            search_type=search_type,
+            use_cache=use_cache,
+        )
+
+        def _complete_metrics(data: pd.DataFrame, period: Period) -> pd.DataFrame:
+            dates = pd.date_range(period.start, period.end, freq="D").strftime("%Y-%m-%d")
+            if data.empty or "date" not in data.columns:
+                return pd.DataFrame({"date": dates, "clicks": 0.0, "impressions": 0.0})
+            daily = data.groupby("date")[["clicks", "impressions"]].sum()
+            return (
+                daily.reindex(dates, fill_value=0)
+                .rename_axis("date")
+                .reset_index()
+            )
+
+        current = _complete_metrics(current_raw, current_period).rename(
+            columns={"date": "current_date", "clicks": "current_clicks", "impressions": "current_impressions"}
+        )
+        previous = _complete_metrics(previous_raw, previous_period).rename(
+            columns={"date": "previous_date", "clicks": "previous_clicks", "impressions": "previous_impressions"}
+        )
+        current["day"] = current.index + 1
+        previous["day"] = previous.index + 1
+        daily = current.merge(previous, on="day", how="outer").sort_values("day")
+        for column in ("current_clicks", "previous_clicks", "current_impressions", "previous_impressions"):
+            daily[column] = daily[column].fillna(0)
+        daily["clicks_change"] = daily["current_clicks"] - daily["previous_clicks"]
+        daily["clicks_change_pct"] = (
+            daily["clicks_change"] / daily["previous_clicks"] * 100
+        ).where(daily["previous_clicks"] != 0)
+        daily["impressions_change"] = (
+            daily["current_impressions"] - daily["previous_impressions"]
+        )
+        daily["impressions_change_pct"] = (
+            daily["impressions_change"] / daily["previous_impressions"] * 100
+        ).where(daily["previous_impressions"] != 0)
+        results[search_type] = daily.reset_index(drop=True)
     return results
 
 

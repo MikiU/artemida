@@ -16,6 +16,9 @@ sites:
     name: "Fakt"
     gsc_property: "https://www.fakt.pl/"
     base_url: "https://www.fakt.pl/"
+    brand_terms:
+      - "fakt.pl"
+      - "fakt"
     category_sitemaps:
       - "https://www.fakt.pl/sitemap-categories.xml"
   onet_wiadomosci:
@@ -45,6 +48,7 @@ def test_loads_two_sites(tmp_path):
     assert config.sites["onet_wiadomosci"].gsc_property == "sc-domain:onet.pl"
     # property przekazywane dokładnie jak w konfiguracji
     assert config.sites["fakt"].gsc_property == "https://www.fakt.pl/"
+    assert config.sites["fakt"].brand_terms == ["fakt.pl", "fakt"]
 
 
 def test_loads_category_groups(tmp_path):

@@ -1,4 +1,4 @@
-# GSC Analyzer (Etap 2 – porównanie dwóch serwisów)
+# GSC Analyzer
 
 Lokalna aplikacja w Pythonie do porównywania danych z **Google Search Console**.
 Obsługuje **wiele serwisów** (konfiguracja w `sites.yaml`) i porównuje **dwa
@@ -148,6 +148,18 @@ sites:
 - `gsc_property` – dokładnie jak w Search Console:
   - URL-prefix property: `https://wiadomosci.onet.pl/`
   - Domain property: `sc-domain:onet.pl`
+- `brand_terms` (opcjonalne) – frazy brandowe liczone w raporcie Search trybu 4:
+  dopasowywane jako fragmenty zapytania, bez względu na wielkość liter. Warto
+  podać warianty z polskimi znakami i bez nich osobno. Przykład:
+
+```yaml
+    brand_terms:
+      - "Onet"
+      - "Onet wiadomości"
+```
+
+  GSC może ukrywać część zapytań i nie gwarantuje zwrócenia wszystkich wierszy,
+  dlatego kliknięcia brandowe mogą nie sumować się do całkowitego ruchu Search.
 - Konto serwisowe musi być dodane jako użytkownik **każdej** property (krok 2.5).
 
 **Grupy kategorii (opcjonalnie)** – ręczne dopasowanie kategorii między
@@ -259,17 +271,57 @@ output/2026-08-13_1520_fakt_vs_onet_wiadomosci/
 
 ## 3b. Dashboard w przeglądarce (Streamlit)
 
-Zamiast CLI możesz użyć graficznego dashboardu (te same analizy, klikalny
-interfejs: wybór serwisów, kalendarz dat, sortowalne tabele, wykresy, pobieranie
-CSV):
+Dashboard obsługuje jeden lub wiele wybranych serwisów w tym samym układzie:
 
 ```powershell
-streamlit run dashboard.py
+python -m streamlit run dashboard.py
 ```
 
-Otworzy się w przeglądarce (np. `http://localhost:8501`). W panelu po lewej
-wybierasz tryb (1/2/3), serwisy, okresy i klikasz **Uruchom analizę**.
-CLI (`python app.py`) działa dalej niezależnie.
+Otworzy się w przeglądarce (np. `http://localhost:8501`). Dostępne są cztery widoki:
+
+| Widok | Dane |
+| --- | --- |
+| Przegląd ruchu | Dzienne kliknięcia i wyświetlenia bez sitemap, zmiany i odchylenia. |
+| Kategorie i treści | Rankingi wzrostów/spadków, pełne tabele kategorii i URL-i, YMYL, urządzenia Search oraz skonfigurowane grupy kategorii dla pary serwisów. |
+| Branded search | Kliknięcia fraz `brand_terms` wybranych serwisów: zakres dat, porównanie okresów lub około 16 miesięcy dostępnej historii. Wyłącznie Search. |
+| Lista URL-i | Wklejone lub wgrane adresy przypisywane do wybranych serwisów, metryki i dzienny wykres ruchu tylko wskazanych URL-i, ich udział w ruchu serwisów. |
+
+W panelu po lewej wybierasz widok, serwisy, źródła i okres, następnie
+**Uruchom analizę**. Pusty wybór nie oznacza wszystkich serwisów.
+Wykres ma osobną linię dla każdego serwisu; opcjonalnie można dodać sumę
+i poprzedni okres (linia przerywana, wyrównanie po numerze dnia, rzeczywiste
+daty w dymku). Kolory serwisów są stałe między widokami. Zakładki **Łącznie**
+i wybranych źródeł rozdzielają Search, Discover i News. Branded ma tylko Search.
+Pełne tabele są widoczne od razu; ranking TOP 20 nie ogranicza pełnych wyników.
+
+Daty ręczne pojawiają się tylko przy własnym zakresie, a daty porównawcze
+tylko przy porównaniu. Różne długości okresów są sygnalizowane i nie powodują
+obcięcia dłuższego okresu. Cache jest w ustawieniach zaawansowanych.
+Zmiana parametrów zapytania ukrywa nieaktualne wyniki; zmiana sumy, metryki,
+progu odchylenia lub pobranie eksportu nie odpytuje ponownie GSC.
+
+Adresy URL przypisywane są według hosta i ścieżki `base_url` oraz zakresu
+property. Nieprzypisane i niejednoznaczne adresy blokują analizę do czasu
+poprawienia listy lub wskazania właściciela. Lista URL-i jest pobierana
+z filtrem strony po stronie GSC; filtr jest częścią klucza cache.
+Pozycja jest dostępna tylko w zakładce Search, CTR wynika z sum kliknięć
+i wyświetleń. ZIP zawiera pełne dane, statusy i parametry analizy; tabele
+można również eksportować osobno do CSV.
+
+**Ograniczenia danych:** suma obejmuje raportowany ruch, nie unikalnych
+użytkowników. Nakładające się properties mogą zawyżać sumę (dashboard ostrzega).
+Błąd pobrania jest oznaczany oddzielnie od poprawnie pobranego zera; częściowe
+wyniki mają ostrzeżenie. Obowiązują limity i kompletność danych GSC; sumy
+z wymiaru URL mogą różnić się od raportów dziennych. Brak `brand_terms`
+lub konfiguracji YMYL jest jawnie sygnalizowany.
+
+Testy (bez połączenia z GSC, z symulowanym API):
+
+```powershell
+python -m pytest tests -q
+```
+
+CLI (`python app.py`) i jego dotychczasowe tryby działają niezależnie.
 
 ---
 

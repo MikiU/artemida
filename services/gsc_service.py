@@ -57,12 +57,18 @@ def _cache_path(
     end_date: str,
     dimensions: list[str],
     search_type: str,
+    query_filter: str | None = None,
+    page_filter: str | None = None,
 ) -> str:
     """Ścieżka pliku cache – klucz uwzględnia property, daty, wymiary i typ."""
     key = f"{gsc_property}|{start_date}|{end_date}|{','.join(dimensions)}"
     # Zachowaj zgodność ze starym cache dla web (bez typu w kluczu).
     if search_type != "web":
         key += f"|{search_type}"
+    if query_filter:
+        key += f"|query_filter:{query_filter}"
+    if page_filter:
+        key += f"|page_filter:{page_filter}"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return os.path.join(CACHE_DIR, f"{digest}.csv")
 
@@ -75,6 +81,8 @@ def get_gsc_data(
     dimensions: tuple[str, ...] = ("page",),
     search_type: str = "web",
     use_cache: bool = True,
+    query_filter: str | None = None,
+    page_filter: str | None = None,
 ) -> pd.DataFrame:
     """Pobiera dane Search Analytics dla podanych wymiarów i typu danych.
 
@@ -82,11 +90,14 @@ def get_gsc_data(
     search_type: "web" (Search) lub "discover" (Google Discover).
     Zwraca DataFrame z kolumnami: <wymiary...>, clicks, impressions, ctr, position.
     Obsługuje paginację przez startRow. Wynik jest cache'owany lokalnie
-    (klucz: property + daty + wymiary + typ), więc dane domen i typów się nie mieszają.
+    (klucz: property + daty + wymiary + typ + filtry), więc dane domen i typów się nie mieszają.
+    query_filter i page_filter są wyrażeniami regularnymi RE2 łączonymi przez AND.
     """
     dims = list(dimensions)
     columns = dims + ["clicks", "impressions", "ctr", "position"]
-    cache_file = _cache_path(gsc_property, start_date, end_date, dims, search_type)
+    cache_file = _cache_path(
+        gsc_property, start_date, end_date, dims, search_type, query_filter, page_filter
+    )
     if use_cache and os.path.exists(cache_file):
         print(f"Cache hit: {gsc_property} {start_date}..{end_date} [{search_type}]")
         dtype = {dim: str for dim in dims}
@@ -107,6 +118,13 @@ def get_gsc_data(
             "rowLimit": ROW_LIMIT,
             "startRow": start_row,
         }
+        filters = [
+            {"dimension": dimension, "operator": "includingRegex", "expression": expression}
+            for dimension, expression in (("query", query_filter), ("page", page_filter))
+            if expression
+        ]
+        if filters:
+            request_body["dimensionFilterGroups"] = [{"filters": filters}]
 
         try:
             response = (
