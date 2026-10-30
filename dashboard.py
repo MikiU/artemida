@@ -40,6 +40,7 @@ PRESETS = {
     "Tydzień rok do roku": 4,
     "Miesiąc rok do roku": 5,
     "Miesiąc kalendarzowy": 6,
+    "Równe okresy (do 16 miesięcy)": 8,
     "Własne daty": 7,
 }
 COLORS = ("#007f75", "#c44240", "#3973b9", "#bb7900", "#9b5390", "#518333", "#cf6341", "#546a76")
@@ -88,6 +89,23 @@ def _single_period(label, today):
     return Period(start.isoformat(), end.isoformat())
 
 
+def _equal_periods(today, days=None, months=None):
+    history = _single_period("Maksymalny zakres (16 miesięcy)", today)
+    end = date.fromisoformat(history.end)
+    maximum = ((end - date.fromisoformat(history.start)).days + 1) // 2
+    if months is not None:
+        end_exclusive = pd.Timestamp(end + timedelta(days=1))
+        days = (end_exclusive - (end_exclusive - pd.DateOffset(months=months))).days
+    length = maximum if days is None else days
+    if not 1 <= length <= maximum:
+        raise ValueError("Oba równe okresy muszą mieścić się w historii GSC.")
+    start = end - timedelta(days=length - 1)
+    return (
+        Period(start.isoformat(), end.isoformat()),
+        Period((start - timedelta(days=length)).isoformat(), (start - timedelta(days=1)).isoformat()),
+    )
+
+
 def _period_controls(view):
     today = date.today()
     prefix = f"settings:{view}"
@@ -98,6 +116,18 @@ def _period_controls(view):
     ]
     default = len(labels) - 1 if view in VIEWS[2:] else 0
     label = st.sidebar.selectbox("Okres", labels, index=default, key=prefix + ":preset")
+    if label == "Równe okresy (do 16 miesięcy)":
+        maximum_period, _ = _equal_periods(today)
+        maximum = (date.fromisoformat(maximum_period.end) - date.fromisoformat(maximum_period.start)).days + 1
+        unit = st.sidebar.radio("Długość okresu", ["Maksimum", "Dni", "Miesiące"], key=prefix + ":unit")
+        days, months = None, None
+        if unit == "Dni":
+            days = st.sidebar.slider("Dni w każdym okresie", 1, maximum, maximum, key=prefix + ":days")
+        elif unit == "Miesiące":
+            end = pd.Timestamp(maximum_period.end) + pd.Timedelta(days=1)
+            max_months = max(count for count in range(1, 17) if (end - (end - pd.DateOffset(months=count))).days <= maximum)
+            months = st.sidebar.slider("Miesiące w bieżącym okresie", 1, max_months, max_months, key=prefix + ":months")
+        return _equal_periods(today, days=days, months=months)
     if label != "Własne daty":
         if not compare:
             return _single_period(label, today), None
@@ -297,13 +327,14 @@ def _download_bundle(bundle):
     buffer = io.BytesIO()
     request = bundle["request"]
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name in ("daily", "pages", "trees", "devices", "totals", "statuses"):
+        for name in ("daily", "pages", "trees", "devices", "totals", "statuses", "url_daily"):
             archive.writestr(f"{name}.csv", bundle[name].to_csv(index=False).encode("utf-8-sig"))
         metadata = pd.DataFrame([{
             "view": request.view, "sites": ",".join(request.site_keys), "sources": ",".join(request.sources),
             "current_start": request.current.start, "current_end": request.current.end,
             "previous_start": request.previous.start if request.previous else "",
             "previous_end": request.previous.end if request.previous else "",
+            "export_url_daily": request.export_url_daily,
         }])
         archive.writestr("parameters.csv", metadata.to_csv(index=False).encode("utf-8-sig"))
     st.download_button("Pobierz wszystkie wyniki (ZIP)", buffer.getvalue(), "gsc_dashboard.zip", "application/zip")
@@ -318,13 +349,22 @@ def _render_results(bundle, sites_config, threshold):
         if row.status not in ("ok", "no_data"):
             st.warning(f"{row.site_name} / {SOURCE_LABELS[row.source]}: {row.error}")
     _download_bundle(bundle)
+    if request.export_url_daily:
+        if bundle["url_daily"].empty:
+            st.info("Brak dziennych danych URL-i do eksportu.")
+        else:
+            st.download_button(
+                "Pobierz URL-e z datami i ruchem (CSV)",
+                bundle["url_daily"].to_csv(index=False).encode("utf-8-sig"),
+                file_name="url_daily.csv", mime="text/csv",
+            )
     if bundle["daily"].empty:
         st.info("Brak danych dla wybranych serwisów i źródeł.")
         _table(statuses, "Status pobierania", "statuses.csv")
         return
     controls = st.columns(3)
     show_sum = controls[0].checkbox("Suma serwisów", key=request.view + ":show_sum")
-    show_previous = controls[1].checkbox("Pokaż poprzedni okres", key=request.view + ":show_previous") if request.previous else False
+    show_previous = controls[1].checkbox("Pokaż poprzedni okres", value=True, key=request.view + ":show_previous") if request.previous else False
     metric = "clicks"
     if request.view in (VIEWS[0], VIEWS[3]):
         metric = "impressions" if controls[2].radio("Metryka", ["Kliknięcia", "Wyświetlenia"], horizontal=True, key=request.view + ":metric") == "Wyświetlenia" else "clicks"
@@ -405,12 +445,20 @@ def main():
     preferences = dict(st.session_state.get("period_preferences", {}))
     preferences.update({key: value for key, value in st.session_state.items() if key.startswith(preference_prefix)})
     st.session_state["period_preferences"] = preferences
-    st.sidebar.caption(f"Bieżący: {current.start} — {current.end}")
+    current_days = (date.fromisoformat(current.end) - date.fromisoformat(current.start)).days + 1
+    st.sidebar.caption(f"Bieżący: {current.start} — {current.end} ({current_days} dni)")
     if previous:
-        st.sidebar.caption(f"Poprzedni: {previous.start} — {previous.end}")
+        previous_days = (date.fromisoformat(previous.end) - date.fromisoformat(previous.start)).days + 1
+        st.sidebar.caption(f"Poprzedni: {previous.start} — {previous.end} ({previous_days} dni)")
     threshold = st.sidebar.slider("Próg dziennego odchylenia (%)", 10, 200, 30, step=10) if view == VIEWS[0] and previous else 30
     with st.sidebar.expander("Zaawansowane"):
         use_cache = st.checkbox("Użyj cache", value=True, key="use_cache")
+    export_url_daily = False
+    if view != VIEWS[2]:
+        export_url_daily = st.sidebar.checkbox(
+            "Eksport URL-i z datami i ruchem", key=preference_prefix + "export_url_daily",
+            help="Dodatkowe pobieranie dzień po dniu. Długie okresy i duże serwisy mogą wymagać wielu zapytań i dużego pliku. GSC zwraca najważniejsze wiersze, do 50 000 dziennie na serwis i źródło; eksport może nie zawierać wszystkich URL-i.",
+        )
     st.header(view)
     assignments, urls, unresolved = (), [], []
     if view == VIEWS[3]:
@@ -422,7 +470,7 @@ def main():
         st.warning("Okresy mają różną długość. Porównanie obejmuje wszystkie dni obu okresów.")
     valid = bool(selected and sources and valid_dates and (view != VIEWS[3] or (urls and not unresolved)))
     run = st.sidebar.button("Uruchom analizę", type="primary", disabled=not valid)
-    request = AnalysisRequest(view, selected, sources, current, previous, assignments, use_cache)
+    request = AnalysisRequest(view, selected, sources, current, previous, assignments, use_cache, export_url_daily)
     if run:
         progress = st.progress(0.0, text="Pobieranie danych")
         try:

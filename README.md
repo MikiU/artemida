@@ -308,6 +308,16 @@ obcięcia dłuższego okresu. Cache jest w ustawieniach zaawansowanych.
 Zmiana parametrów zapytania ukrywa nieaktualne wyniki; zmiana sumy, metryki,
 progu odchylenia lub pobranie eksportu nie odpytuje ponownie GSC.
 
+Przy włączonym porównaniu **Równe okresy (do 16 miesięcy)** domyślnie
+dzieli dostępne okno historii na dwa sąsiadujące okresy o tej samej liczbie dni.
+Jeśli liczba dni historii jest nieparzysta, pomija najstarszy dzień.
+Można wybrać maksimum albo skrócić zakres suwakiem dni lub miesięcy.
+Miesiące wyznaczają długość bieżącego zakresu, a poprzedni dostaje dokładnie
+tyle samo dni, niezależnie od długości miesięcy. Oba zakresy i liczby dni
+są widoczne w panelu bocznym. Poprzedni okres jest domyślnie nałożony
+na bieżący na wykresie. Pełnych 16 miesięcy nie można porównać z poprzednimi
+16 miesiącami, ponieważ GSC nie udostępnia tak długiej historii.
+
 Adresy URL przypisywane są według hosta i ścieżki `base_url` oraz zakresu
 property. Nieprzypisane i niejednoznaczne adresy blokują analizę do czasu
 poprawienia listy lub wskazania właściciela. Lista URL-i jest pobierana
@@ -315,6 +325,19 @@ z filtrem strony po stronie GSC; filtr jest częścią klucza cache.
 Pozycja jest dostępna tylko w zakładce Search, CTR wynika z sum kliknięć
 i wyświetleń. ZIP zawiera pełne dane, statusy i parametry analizy; tabele
 można również eksportować osobno do CSV.
+
+Opcja **Eksport URL-i z datami i ruchem** w przeglądzie ruchu, kategoriach
+i liście URL-i dodaje plik `url_daily.csv`, dostępny osobno i w ZIP-ie.
+Każdy wiersz zawiera serwis, źródło, okres (`current`/`previous`), rzeczywistą
+datę ruchu, URL, kliknięcia, wyświetlenia i CTR; pozycję tylko dla Search.
+To data ruchu, nie publikacji artykułu. Lista URL-i ogranicza eksport do
+wskazanych adresów, pozostałe widoki pobierają URL-e całego serwisu.
+Eksport jest opcjonalny i pobiera dane dzień po dniu, korzystając z cache.
+Długie okresy i duże serwisy mogą oznaczać wiele zapytań i bardzo duże pliki.
+GSC zwraca najważniejsze wiersze, maksymalnie 50 000 dziennie na property
+i źródło; plik może nie zawierać wszystkich URL-i, a dni bez zwróconych
+wierszy nie są dopisywane jako zera. Błąd eksportu jednego serwisu/źródła
+jest sygnalizowany i nie usuwa poprawnego raportu ani eksportów pozostałych.
 
 **Ograniczenia danych:** suma obejmuje raportowany ruch, nie unikalnych
 użytkowników. Nakładające się properties mogą zawyżać sumę (dashboard ostrzega).

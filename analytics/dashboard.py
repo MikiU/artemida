@@ -24,6 +24,7 @@ VIEWS = ("Przegląd ruchu", "Kategorie i treści", "Branded search", "Lista URL-
 SOURCE_LABELS = {"web": "Search", "discover": "Discover", "news": "News"}
 IDENTITY = ["site_key", "site_name", "source"]
 DAILY_COLUMNS = IDENTITY + ["period", "date", "day", "clicks", "impressions"]
+URL_DAILY_COLUMNS = IDENTITY + ["period", "date", "page", "clicks", "impressions", "ctr", "position"]
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class AnalysisRequest:
     previous: Period | None = None
     urls: tuple[tuple[str, str], ...] = ()
     use_cache: bool = True
+    export_url_daily: bool = False
 
 
 def parse_urls(text: str) -> list[str]:
@@ -159,8 +161,32 @@ def _filtered_data(request, site, source, period, dimensions, credentials, urls)
     return data
 
 
+def _url_daily_export(request, site, source, credentials, progress=None):
+    frames = []
+    urls = [url for url, owner in request.urls if owner == site.key]
+    for name, period in (("current", request.current), ("previous", request.previous)):
+        if period is None:
+            continue
+        for day in pd.date_range(period.start, period.end):
+            stamp = day.strftime("%Y-%m-%d")
+            if progress:
+                progress(stamp)
+            if request.view == VIEWS[3]:
+                data = _filtered_data(request, site, source, Period(stamp, stamp), ("date", "page"), credentials, urls)
+            else:
+                data = get_gsc_data(
+                    stamp, stamp, site.gsc_property, credentials,
+                    dimensions=("date", "page"), search_type=source, use_cache=request.use_cache,
+                )
+            if source != "web":
+                data = data.drop(columns=["position"], errors="ignore")
+            frames.append(_identified(data.assign(period=name), site, source))
+    return _concat(frames, URL_DAILY_COLUMNS)
+
+
 def collect_dashboard(request: AnalysisRequest, sites: dict[str, SiteConfig], credentials: str, progress=None) -> dict:
     daily, pages, trees, devices, totals, statuses, notices = [], [], [], [], [], [], []
+    url_daily = []
     analyses = {}
     for index, key in enumerate(request.site_keys):
         site = sites[key]
@@ -222,12 +248,19 @@ def collect_dashboard(request: AnalysisRequest, sites: dict[str, SiteConfig], cr
                         target.append(_identified(frame, site, source))
                 has_data = any(frame["clicks"].sum() > 0 for frame in source_daily)
                 statuses.append(dict(site_key=key, site_name=site.name, source=source, status="ok" if has_data else "no_data", error=""))
+                if request.export_url_daily and request.view != VIEWS[2]:
+                    try:
+                        report_progress = (lambda stamp: progress(index / len(request.site_keys), f"{site.name} / {SOURCE_LABELS[source]} / URL-e: {stamp}")) if progress else None
+                        url_daily.append(_url_daily_export(request, site, source, credentials, report_progress))
+                    except (GSCError, ValueError) as exc:
+                        notices.append(f"{site.name} / {SOURCE_LABELS[source]}: eksport dzienny URL-i nie został ukończony: {exc}")
             except (GSCError, SitemapError, ValueError) as exc:
                 statuses.append(dict(site_key=key, site_name=site.name, source=source, status="error", error=str(exc)))
     return dict(
         request=request, daily=_concat(daily, DAILY_COLUMNS), pages=_concat(pages),
         trees=_concat(trees), devices=_concat(devices), totals=pd.DataFrame(totals),
         statuses=pd.DataFrame(statuses), analyses=analyses, notices=notices,
+        url_daily=_concat(url_daily, URL_DAILY_COLUMNS),
     )
 
 

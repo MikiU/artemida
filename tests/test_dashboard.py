@@ -64,6 +64,11 @@ def dashboard_env(monkeypatch):
             urls.append(f"https://{key}.pl/news/discover")
         if kwargs.get("page_filter"):
             urls = [url for url in urls if re.search(kwargs["page_filter"], url)]
+        if dimensions == ("date", "page"):
+            return pd.DataFrame([
+                {"date": stamp, "page": url, "clicks": clicks, "impressions": clicks * 10, "ctr": 0.1, "position": 2.0}
+                for stamp in dates for url in urls
+            ], columns=["date", "page", "clicks", "impressions", "ctr", "position"])
         return pd.DataFrame({"page": urls, "clicks": clicks * len(dates), "impressions": clicks * len(dates) * 10, "ctr": 0.1, "position": 2.0})
 
     monkeypatch.setattr("config.load_global_config", lambda: GlobalConfig("unused"))
@@ -281,3 +286,128 @@ def test_full_history_clamps_month_end():
     result = _single_period("Maksymalny zakres (16 miesięcy)", date(2024, 6, 30))
     assert result.start == "2023-02-28"
     assert result.end == "2024-06-27"
+
+
+@pytest.mark.parametrize("today", ["2026-10-30", "2024-06-30", "2024-02-29", "2025-03-31"])
+@pytest.mark.parametrize("options", [{}, {"days": 1}, {"days": 90}, {"months": 7}])
+def test_equal_periods_fit_history_and_have_identical_lengths(today, options):
+    from datetime import date, timedelta
+    from dashboard import _equal_periods, _single_period
+
+    anchor = date.fromisoformat(today)
+    current, previous = _equal_periods(anchor, **options)
+    history = _single_period("Maksymalny zakres (16 miesięcy)", anchor)
+    length = (date.fromisoformat(current.end) - date.fromisoformat(current.start)).days + 1
+    assert length == (date.fromisoformat(previous.end) - date.fromisoformat(previous.start)).days + 1
+    assert date.fromisoformat(previous.end) + timedelta(days=1) == date.fromisoformat(current.start)
+    assert previous.start >= history.start
+    assert current.end == history.end
+    if not options:
+        assert (date.fromisoformat(previous.start) - date.fromisoformat(history.start)).days <= 1
+
+
+def test_equal_periods_reject_out_of_history():
+    from datetime import date
+    from dashboard import _equal_periods
+
+    for options in ({"days": 0}, {"days": 365}, {"months": 16}):
+        with pytest.raises(ValueError):
+            _equal_periods(date(2026, 10, 30), **options)
+
+
+def test_equal_period_controls_overlay_by_default(dashboard_env):
+    app_test, _, calls = dashboard_env
+    app_test.run()
+    app_test.multiselect(key="selected_sites").set_value(["a"]).run()
+    app_test.selectbox[0].set_value("Równe okresy (do 16 miesięcy)").run()
+    app_test.radio(key="settings:Przegląd ruchu:unit").set_value("Dni").run()
+    app_test.slider(key="settings:Przegląd ruchu:days").set_value(90).run()
+    run_analysis(app_test)
+    assert not app_test.exception
+    assert app_test.checkbox(key="Przegląd ruchu:show_previous").value
+    saved = app_test.session_state["result:Przegląd ruchu"]
+    assert saved["daily"].groupby("period").size().to_dict() == {"current": 90, "previous": 90}
+    assert calls
+
+
+@pytest.mark.parametrize("view", VIEWS)
+def test_equal_period_month_slider_in_every_view(dashboard_env, view):
+    from datetime import date
+    from dashboard import _equal_periods
+
+    app_test, _, calls = dashboard_env
+    app_test.run()
+    app_test.sidebar.radio[0].set_value(view).run()
+    app_test.checkbox(key=f"settings:{view}:compare").check().run()
+    app_test.selectbox(key=f"settings:{view}:preset").set_value("Równe okresy (do 16 miesięcy)").run()
+    app_test.radio(key=f"settings:{view}:unit").set_value("Miesiące").run()
+    app_test.slider(key=f"settings:{view}:months").set_value(3).run()
+    assert not app_test.exception
+    current, previous = _equal_periods(date.today(), months=3)
+    captions = [widget.value for widget in app_test.caption]
+    assert any(current.start in text and current.end in text for text in captions)
+    assert any(previous.start in text and previous.end in text for text in captions)
+    assert not app_test.date_input
+    assert not calls
+
+
+@pytest.mark.parametrize("view", [VIEWS[0], VIEWS[1], VIEWS[3]])
+def test_daily_url_export_contains_dates_traffic_and_periods(dashboard_env, view):
+    import analytics.dashboard as data
+    from analysis import Period
+
+    _, sites, calls = dashboard_env
+    request = data.AnalysisRequest(
+        view, ("a",), ("web", "discover"), Period("2026-10-25", "2026-10-26"),
+        Period("2026-10-23", "2026-10-24"), (("https://a.pl/news/article", "a"),),
+        export_url_daily=True,
+    )
+    bundle = data.collect_dashboard(request, sites, "unused")
+    exported = bundle["url_daily"]
+    assert not any("eksport dzienny" in notice for notice in bundle["notices"])
+    assert set(exported["period"]) == {"current", "previous"}
+    assert set(exported["date"]) == {"2026-10-23", "2026-10-24", "2026-10-25", "2026-10-26"}
+    assert set(exported["source"]) == {"web", "discover"}
+    assert exported["clicks"].gt(0).all()
+    assert exported["impressions"].gt(0).all()
+    assert exported.loc[exported["source"] == "discover", "position"].isna().all()
+    export_calls = [kwargs for _, dims, kwargs in calls if dims == ("date", "page")]
+    assert len(export_calls) == 8
+    assert all(kwargs["start_date"] == kwargs["end_date"] for kwargs in export_calls)
+    if view == VIEWS[3]:
+        assert set(exported["page"]) == {"https://a.pl/news/article"}
+        assert all(kwargs.get("page_filter") for kwargs in export_calls)
+
+
+def test_daily_url_export_failure_preserves_report(dashboard_env, monkeypatch):
+    import analytics.dashboard as data
+    from analysis import Period
+    from services.gsc_service import GSCError
+
+    _, sites, _ = dashboard_env
+    def fail_export(*args, **kwargs):
+        raise GSCError("Limit API")
+
+    monkeypatch.setattr(data, "_url_daily_export", fail_export)
+    request = data.AnalysisRequest(VIEWS[0], ("a",), ("web",), Period("2026-10-25", "2026-10-26"), export_url_daily=True)
+    bundle = data.collect_dashboard(request, sites, "unused")
+    assert not bundle["daily"].empty
+    assert bundle["url_daily"].empty
+    assert bundle["statuses"]["status"].tolist() == ["ok"]
+    assert "Limit API" in bundle["notices"][0]
+
+
+def test_daily_url_export_downloads_without_refetch(dashboard_env):
+    app_test, _, calls = dashboard_env
+    app_test.run()
+    app_test.multiselect(key="selected_sites").set_value(["a"]).run()
+    app_test.checkbox(key="settings:Przegląd ruchu:export_url_daily").check().run()
+    run_analysis(app_test)
+    assert not app_test.exception
+    saved = app_test.session_state["result:Przegląd ruchu"]
+    assert not saved["url_daily"].empty
+    assert any(widget.proto.label == "Pobierz URL-e z datami i ruchem (CSV)" for widget in app_test.get("download_button"))
+    count = len(calls)
+    app_test.checkbox(key="Przegląd ruchu:show_sum").check().run()
+    assert not app_test.exception
+    assert len(calls) == count
