@@ -33,6 +33,7 @@ class SiteConfig:
     # Ścieżki wykluczone z YMYL mimo dopasowania do ymyl_paths (np. Pogoda).
     ymyl_exclude_paths: list[str] = field(default_factory=list)
     brand_terms: list[str] = field(default_factory=list)
+    weekly_monitoring: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -75,6 +76,7 @@ def load_global_config() -> GlobalConfig:
 
 def load_sites(path: str = "sites.yaml") -> SitesConfig:
     """Wczytuje konfigurację serwisów z pliku YAML lub ze zmiennej SITES_YAML."""
+    load_dotenv()
     raw_yaml = os.getenv("SITES_YAML", "").strip()
     if raw_yaml:
         source = "SITES_YAML"
@@ -146,6 +148,7 @@ def load_sites(path: str = "sites.yaml") -> SitesConfig:
             ymyl_paths=[str(p) for p in ymyl],
             ymyl_exclude_paths=[str(p) for p in ymyl_exclude],
             brand_terms=[str(term).strip() for term in brand_terms if str(term).strip()],
+            weekly_monitoring=cfg.get("weekly_monitoring") or {},
         )
 
     category_groups = _parse_category_groups(raw.get("category_groups"), sites)

@@ -356,6 +356,162 @@ CLI (`python app.py`) i jego dotychczasowe tryby działają niezależnie.
 
 ---
 
+## Monitoring tygodniowy SEO
+
+Piąty widok dashboardu nie zmienia wcześniejszych analiz. Uruchom aplikację
+z katalogu `gsc-analyzer`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run dashboard.py
+```
+
+Wybierz serwisy i zakończony tydzień ISO. Domyślny zakres to ostatni zakończony
+poniedziałek–niedziela w `America/Los_Angeles`, także na granicy roku i zmiany czasu.
+**Uruchom monitoring** jawnie pobiera Search/web z `dataState=final` dla T i T-1…T-4:
+sumy property, dni, strony i zapytania. Nie korzysta ze starego cache CSV,
+ponieważ ten nie przechowuje metadanych kompletności. Zmiana zakładek, reruny,
+eksporty oraz zapis raportu nie wywołują API.
+
+Kolektor najpierw sprawdza dni zwrócone przez GSC, a następnie pobiera sumy,
+strony i zapytania od poniedziałku do ostatniego dostępnego dnia. Bez niedzieli
+kończy na sobocie, bez soboty i niedzieli — na piątku (analogicznie dla
+wcześniejszych dni). Wyczerpuje paginację w tym samym skróconym zakresie.
+Brak wszystkich dni oznacza brak danych, a nie zerowy ruch. Sprawdzanie
+dotyczy osobno każdego serwisu i tygodnia T…T-4; nie korzysta z danych innego
+serwisu ani nie przedłuża zakresu poza wybrany tydzień.
+Widok i raport pokazują faktyczny koniec danych oraz liczbę dostępnych dni,
+np. 5/7. Nominalne granice ISO pozostają niezmienione. Niepełne tygodnie
+pozostają szkicem z co najmniej WARN; wcześniejsze pełne tygodnie nie są
+automatycznie skracane, dlatego takie porównania są oznaczone jako wstępne.
+Braki wewnątrz tygodnia również są ujawniane, nawet gdy niedziela jest dostępna.
+
+**Odczyt zapisanych wynikow** jest całkowicie offline, nie wymaga credentials
+i ma wyłączone AI. Można wskazać konkretny pomiar, a następnie zapisany raport
+dotyczący dokładnie tych pomiarów. Uszkodzone wyniki, inne properties i zmienione
+obliczenia są odrzucane. Zapisane progi i frazy brandowe odtwarzają konfigurację
+danego pomiaru, nawet po zmianie bieżących ustawień.
+
+### Konfiguracja Per Serwis
+
+Nie trzeba przenosić konfiguracji źródłowej ani zmieniać autoryzacji.
+Opcjonalnie dodaj pod istniejącym serwisem w `sites.yaml`:
+
+```yaml
+    weekly_monitoring:
+      thresholds:
+        clicks: {warn: 0.15, fail: 0.25}
+        impressions: {warn: 0.15, fail: 0.25}
+        ctr: {warn: 0.15, fail: 0.25}
+        position: {warn: 0.15, fail: 0.25}
+      # Bez tego pola używane są istniejące brand_terms serwisu.
+      brand_terms: [nazwa marki, domena.pl]
+      sitemap_url: https://domena.pl/sitemap.xml
+      representative_urls:
+        home: https://domena.pl/
+        article: https://domena.pl/przykladowy-artykul
+        category: https://domena.pl/kategoria/
+      inspection_limit: 3
+```
+
+Progi są ułamkami względnego pogorszenia, nie punktami procentowymi.
+Domyślnie wszystkie mają WARN 15%, FAIL 25%; obowiązuje ścisłe `>`.
+Pogorszenie WoW musi jednocześnie przekroczyć niekorzystną granicę pasma
+dwóch odchyleń próbki (`ddof=1`) z czterech wcześniejszych tygodni.
+Pozycja ma odwrotny kierunek niż pozostałe metryki. Zerowa baza i braki nie
+oznaczają poprawnego wyniku ani nieskończonego wzrostu. Bez fraz brandowych
+podział brand/non-brand pozostaje nieoceniony.
+
+### Kontrole Techniczne
+
+Opcjonalny pomiar obejmuje robots.txt, sitemapy, maksymalnie 20 stron,
+NewsArticle, PageSpeed/CWV i ograniczoną próbkę URL Inspection.
+Wykorzystuje oryginalny crawler: ten sam origin, robots również przy
+przekierowaniach, minimum sekundowy odstęp, retry i ograniczenia odpowiedzi,
+maksymalnie 50 sitemap i 100 000 URL-i. Konfiguracja kategorii jest tylko
+fallbackiem sitemap i nie oznacza listy najnowszych artykułów.
+
+PageSpeed wymaga `PAGESPEED_API_KEY` w środowisku lub sekretach Streamlit.
+Bez klucza albo reprezentatywnego URL-a wynik jawnie wskazuje brak danych
+lub niewykonaną kontrolę. CWV pochodzi z danych terenowych; fallback `origin`
+jest oznaczony, CLS pozostaje surowym wynikiem z jednostką PSI.
+URL Inspection używa istniejącego klienta GSC, `inspection_limit` (0–20)
+ogranicza próbkę i lokalny budżet dzienny property. Próby, także nieudane
+i ponawiane, rezerwują trwały licznik przed wysłaniem żądania.
+
+Technika to **pomiar aktualny z `checked_at`, nie stan historyczny wybranego
+tygodnia**. Porównanie dotyczy ostatniego zapisanego pomiaru według daty
+wykonania, niezależnie od etykiety tygodnia. Nowy URL w próbce nie dowodzi
+nowej usterki. Brak poprzedniego pomiaru nie oznacza „bez zmian”.
+
+### Raporty I Historia
+
+Każde uruchomienie zapisuje osobny JSON w
+`output/weekly/data/<tydzień>/<serwis>/<pomiar>.json`. Budżety inspekcji są
+we wspólnym `output/weekly/data/_inspection_usage/<dzień>/`, osobno dla property.
+Nie usuwaj liczników ani nie zmieniaj katalogu pomiędzy restartami.
+Przy wielu instancjach użyj wspólnego trwałego wolumenu z atomowymi blokadami;
+lokalny licznik nie jest globalną kontrolą quota projektu Google.
+Streamlit Community Cloud może utracić lokalny dysk przy restarcie/redeployu:
+bez trwałego storage nie zapewnia historii ani trwałości limitów.
+
+Status to najgorszy wynik GSC/techniki, a niepełne GSC to co najmniej WARN.
+Niewykonana lub niedostępna technika również daje ostrożnościowe WARN,
+z osobnym stanem kontroli, a nie informacją o potwierdzonej usterce.
+Dni bez wierszy mogą oznaczać zero ruchu albo brak danych; interfejs nie
+zamienia ich automatycznie w zera. GSC zwraca najważniejsze wiersze, do
+50 000 dziennie/property/typ wyszukiwania, i pomija zapytania anonimowe.
+Paginacja wyczerpuje zwracane wyniki, ale nie gwarantuje pełnego spisu.
+Sumy serwisu nie są obliczane z tabel zapytań. Nowe zapytania oznaczają tylko
+nieobecność w zwróconych danych T-1…T-4.
+
+Raport liczbowy po polsku działa bez AI. Python wylicza liczby, rankingi,
+statusy i kontekst; raport odsyła do pól JSON. Weryfikacja ponownie liczy
+anomalie, sprawdza tożsamość oraz statusy i porównuje tekst z kontrolowanym
+szablonem. Zmodyfikowany raport nie jest oznaczany jako gotowy.
+Zgodność pól i obliczeń jest oddzielona od kompletności: przy niepełnym
+GSC raport ma stan **SZKIC** (`verified=true`, `ready=false`). Sygnały
+anomalii i rankingi pozostają widoczne jako wstępne, nie jako potwierdzona
+ocena pełnego tygodnia. Po uzupełnieniu dni przez GSC trzeba świadomie
+ponowić pomiar; odczyt offline nie aktualizuje danych samoczynnie.
+Wersja bez interpretacji AI pokazuje sygnały do ręcznej oceny, a nie
+automatyczne rekomendacje redakcyjne. W raporcie liczby są formatowane
+przez Python (CTR jako procent, zmiany do dwóch miejsc po przecinku);
+eksporty JSON zachowują pełną precyzję i źródłowe pola.
+Eksporty: JSON, Markdown i ZIP z raportem oraz dokładnymi plikami źródłowymi
+pasującymi do komentarzy `evidence`. **Zapisz raport** zachowuje także
+interpretacje i recenzje w `output/weekly/reports/<tydzień>/`.
+
+Opcjonalne AI: ustaw `SEO_AI_API_KEY`, `SEO_AI_MODEL` oraz ewentualnie
+`SEO_AI_BASE_URL` (domyślnie `https://api.openai.com/v1`, wymagane HTTPS).
+Obsługiwane są serwery zgodne z Chat Completions i JSON response format.
+Żądania następują tylko po **Interpretuj z AI**, oddzielnie dla każdego serwisu.
+Do dostawcy trafiają wybrane liczby i etykiety URL/zapytań danego serwisu,
+nie credentials, treści stron ani konfiguracja sekretów. Uwzględnij zasady
+organizacji dotyczące przesyłania danych GSC zewnętrznemu dostawcy.
+AI nie generuje faktów liczbowych: wskazuje istniejący sygnał i proponuje
+oznaczoną hipotezę oraz sposób jej sprawdzenia. Walidacja lokalna odrzuca
+nowe liczby/statusy i niewłaściwe źródła; osobna recenzja modelowa musi
+zaakceptować tekst. Odrzucone lub niedostępne AI nie blokuje raportu liczbowego.
+Nie ma prognoz ruchu; recenzja modelowa nie gwarantuje bezbłędności.
+
+### Pochodzenie I Testy
+
+Moduły `weekly/common.py`, `fetch_gsc.py`, `detect_anomalies.py`, `tech_checks.py`
+i `report_context.py` zaadaptowano z istniejącego projektu `Flesh/seo-weekly/scripts`.
+Testy źródłowe i ich niesekretna konfiguracja są w `tests/weekly/`.
+Zachowano semantykę obliczeń, retry, robots, budżetów i porównań;
+autoryzacja, konfiguracja, historia i widok są adapterami aplikacji.
+Instrukcje pięciu agentów źródłowych wykorzystano jako specyfikację raportów,
+nie jako zależność wykonawczą. Streamlit nie wymaga VS Code ani agentów.
+Nie skopiowano sekretów, danych pomiarowych ani deweloperskich zależności
+źródła. Testy są offline; same nie potwierdzają działania żywych API:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/weekly -q --import-mode=importlib
+.\.venv\Scripts\python.exe -m pytest tests -q --import-mode=importlib
+```
+
 ## 3c. Publikacja jako jeden link (Streamlit Community Cloud)
 
 Aby udostępnić dashboard pod jednym adresem, bez plików `.env`/`credentials.json`

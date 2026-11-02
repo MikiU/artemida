@@ -30,7 +30,7 @@ def test_four_views_share_one_site_selector(monkeypatch):
     ):
         app_test.run()
         assert not app_test.exception
-        assert app_test.sidebar.radio[0].options == VIEWS
+        assert app_test.sidebar.radio[0].options == VIEWS + ["Monitoring tygodniowy SEO"]
         for view in VIEWS:
             app_test.sidebar.radio[0].set_value(view).run()
             assert not app_test.exception

@@ -1,0 +1,161 @@
+request_interval_seconds: 1.0
+max_retries: 4
+sites:
+  - id: fakt
+    name: Fakt
+    placeholder: false
+    gsc_property: https://www.fakt.pl/
+    base_url: https://www.fakt.pl/
+    sitemap_url: null
+    category_sitemaps: [https://www.fakt.pl/sitemap-categories.xml]
+    brand_terms: [fakt.pl, fakt]
+    thresholds: &default_thresholds
+      clicks: {warn: 0.15, fail: 0.25}
+      impressions: {warn: 0.15, fail: 0.25}
+      ctr: {warn: 0.15, fail: 0.25}
+      position: {warn: 0.15, fail: 0.25}
+    representative_urls:
+      home: https://www.fakt.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: onet
+    name: Onet
+    placeholder: false
+    gsc_property: https://www.onet.pl/
+    base_url: https://www.onet.pl/
+    sitemap_url: null
+    category_sitemaps: []
+    brand_terms: [onet, onet.pl]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://www.onet.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: onet_wiadomosci
+    name: "Onet Wiadomości"
+    placeholder: false
+    gsc_property: https://wiadomosci.onet.pl/
+    base_url: https://wiadomosci.onet.pl/
+    sitemap_url: null
+    category_sitemaps: [https://wiadomosci.onet.pl/sitemap-categories.xml]
+    brand_terms: [Onet, "Onet wiadomości", "Wiadomości Onet"]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://wiadomosci.onet.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: auto-swiat
+    name: "Auto Świat"
+    placeholder: false
+    gsc_property: https://www.auto-swiat.pl/
+    base_url: https://www.auto-swiat.pl/
+    sitemap_url: null
+    category_sitemaps: [https://www.auto-swiat.pl/sitemap-categories.xml]
+    brand_terms: ["auto świat", auto swiat]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://www.auto-swiat.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: kobieta.onet.pl
+    name: Kobieta Onet
+    placeholder: false
+    gsc_property: https://kobieta.onet.pl/
+    base_url: https://kobieta.onet.pl/
+    sitemap_url: null
+    category_sitemaps: [https://kobieta.onet.pl/sitemap-categories.xml]
+    brand_terms: [Kobieta Onet]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://kobieta.onet.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: komputerswiat.pl
+    name: "Komputer Świat"
+    placeholder: false
+    gsc_property: https://www.komputerswiat.pl/
+    base_url: https://www.komputerswiat.pl/
+    sitemap_url: null
+    category_sitemaps: [https://www.komputerswiat.pl/sitemap-categories.xml]
+    brand_terms: ["komputer świat", "komputerświat", komputerswiat]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://www.komputerswiat.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: businessinsider.com.pl
+    name: Business Insider Polska
+    placeholder: false
+    gsc_property: https://businessinsider.com.pl/
+    base_url: https://businessinsider.com.pl/
+    sitemap_url: null
+    category_sitemaps: [https://businessinsider.com.pl/sitemap-service-nodes-index.xml.gz]
+    brand_terms: [business insider, business insider polska]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://businessinsider.com.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: plejada.pl
+    name: Plejada
+    placeholder: false
+    gsc_property: https://plejada.pl/
+    base_url: https://plejada.pl/
+    sitemap_url: null
+    category_sitemaps: [https://plejada.pl/sitemap-categories.xml]
+    brand_terms: [plejada]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://plejada.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: kultura.onet.pl
+    name: Kultura Onet
+    placeholder: false
+    gsc_property: https://kultura.onet.pl/
+    base_url: https://kultura.onet.pl/
+    sitemap_url: null
+    category_sitemaps: [https://kultura.onet.pl/sitemap-categories.xml]
+    brand_terms: [kultura onet]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://kultura.onet.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: przegladsportowy.onet.pl
+    name: "Przegląd Sportowy"
+    placeholder: false
+    gsc_property: https://przegladsportowy.onet.pl/
+    base_url: https://przegladsportowy.onet.pl/
+    sitemap_url: null
+    category_sitemaps: [https://przegladsportowy.onet.pl/sitemap-categories.xml]
+    brand_terms: ["przegląd sportowy", "przegląd sportowy onet", przeglad sportowy]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://przegladsportowy.onet.pl/
+      article: null
+      category: null
+    inspection_limit: 3
+  - id: podroze.onet.pl
+    name: "Podróże Onet"
+    placeholder: false
+    gsc_property: https://podroze.onet.pl/
+    base_url: https://podroze.onet.pl/
+    sitemap_url: null
+    category_sitemaps: [https://podroze.onet.pl/sitemap-categories.xml]
+    brand_terms: ["podróże onet", "podróże"]
+    thresholds: *default_thresholds
+    representative_urls:
+      home: https://podroze.onet.pl/
+      article: null
+      category: null
+    inspection_limit: 3

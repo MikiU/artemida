@@ -411,7 +411,7 @@ def _render_results(bundle, sites_config, threshold):
 def main():
     st.set_page_config(page_title="Artemida", layout="wide")
     st.title("Artemida")
-    for key in ("GOOGLE_CREDENTIALS_JSON", "SITES_YAML", "APP_PASSWORD"):
+    for key in ("GOOGLE_CREDENTIALS_JSON", "SITES_YAML", "APP_PASSWORD", "SEO_AI_API_KEY", "SEO_AI_MODEL", "SEO_AI_BASE_URL", "PAGESPEED_API_KEY"):
         try:
             if key in st.secrets:
                 os.environ[key] = str(st.secrets[key])
@@ -419,17 +419,27 @@ def main():
             pass
     _password_gate()
     try:
-        global_config, sites_config = load_global_config(), load_sites()
+        sites_config = load_sites()
     except ConfigError as exc:
         st.error(str(exc))
         return
     sites = sites_config.sites
-    view = st.sidebar.radio("Widok", VIEWS, key="view")
+    weekly_view = "Monitoring tygodniowy SEO"
+    view = st.sidebar.radio("Widok", (*VIEWS, weekly_view), key="view")
     actions = st.sidebar.columns(2)
     actions[0].button("Wszystkie", on_click=_set_sites, args=(tuple(sites),))
     actions[1].button("Wyczyść", on_click=_set_sites, args=((),))
     selected = st.sidebar.multiselect("Serwisy", list(sites), format_func=lambda key: sites[key].name, key="selected_sites")
     selected = tuple(key for key in sites if key in selected)
+    if view == weekly_view:
+        from weekly.view import render
+        render(sites, selected)
+        return
+    try:
+        global_config = load_global_config()
+    except ConfigError as exc:
+        st.error(str(exc))
+        return
     if view == VIEWS[2]:
         sources = ("web",)
     else:
