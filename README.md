@@ -277,7 +277,7 @@ Dashboard obsługuje jeden lub wiele wybranych serwisów w tym samym układzie:
 python -m streamlit run dashboard.py
 ```
 
-Otworzy się w przeglądarce (np. `http://localhost:8501`). Dostępne są cztery widoki:
+Otworzy się w przeglądarce (np. `http://localhost:8501`). Dostępne są następujące widoki:
 
 | Widok | Dane |
 | --- | --- |
@@ -285,6 +285,18 @@ Otworzy się w przeglądarce (np. `http://localhost:8501`). Dostępne są cztery
 | Kategorie i treści | Rankingi wzrostów/spadków, pełne tabele kategorii i URL-i, YMYL, urządzenia Search oraz skonfigurowane grupy kategorii dla pary serwisów. |
 | Branded search | Kliknięcia fraz `brand_terms` wybranych serwisów: zakres dat, porównanie okresów lub około 16 miesięcy dostępnej historii. Wyłącznie Search. |
 | Lista URL-i | Wklejone lub wgrane adresy przypisywane do wybranych serwisów, metryki i dzienny wykres ruchu tylko wskazanych URL-i, ich udział w ruchu serwisów. |
+
+| Wpływ aktualizacji Google | Osobne wykresy Search i Discover, porównanie równych okresów przed i po aktualizacji oraz rankingi zmian URL-i. |
+
+W analizie aktualizacji wybierz serwisy, datę rozpoczęcia i opcjonalnie datę
+zakończenia wdrażania oraz długość każdego z okresów (7, 14 lub 28 dni). Dni
+wdrażania nie są uwzględniane w porównaniu. Analiza wymaga pełnego okresu po
+aktualizacji oraz przyjętego trzydniowego opóźnienia GSC; faktyczne opóźnienie
+może być dłuższe. Brak dat w odpowiedzi GSC blokuje porównanie dla danego
+serwisu i źródła, ale pozostałe wyniki pozostają dostępne. Wykres pokazuje
+rzeczywiste daty, także w trakcie wdrażania. Cache jest domyślnie wyłączony.
+Zmiany nie dowodzą związku przyczynowego z aktualizacją, a dane URL mogą być
+niepełne; brak URL-a w odpowiedzi GSC nie dowodzi braku jego ruchu.
 
 W panelu po lewej wybierasz widok, serwisy, źródła i okres, następnie
 **Uruchom analizę**. Pusty wybór nie oznacza wszystkich serwisów.

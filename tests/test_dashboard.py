@@ -30,7 +30,7 @@ def test_four_views_share_one_site_selector(monkeypatch):
     ):
         app_test.run()
         assert not app_test.exception
-        assert app_test.sidebar.radio[0].options == VIEWS + ["Monitoring tygodniowy SEO"]
+        assert app_test.sidebar.radio[0].options == VIEWS + ["Monitoring tygodniowy SEO", "Wpływ aktualizacji Google"]
         for view in VIEWS:
             app_test.sidebar.radio[0].set_value(view).run()
             assert not app_test.exception
@@ -82,6 +82,45 @@ def dashboard_env(monkeypatch):
 
 def run_analysis(app_test):
     next(widget for widget in app_test.button if widget.label == "Uruchom analizę").click().run()
+
+
+def test_update_view_compares_both_sources_and_blocks_unfinished_period(dashboard_env, monkeypatch):
+    from datetime import date, timedelta
+    import analytics.update_analysis as update_data
+
+    app_test, _, _ = dashboard_env
+    calls = []
+
+    def fake_gsc(start, end, prop, credentials, dimensions, search_type, use_cache):
+        calls.append((prop, dimensions, search_type))
+        if dimensions == ("date",):
+            dates = pd.date_range(start, end).strftime("%Y-%m-%d")
+            return pd.DataFrame({"date": dates, "clicks": 10, "impressions": 100})
+        clicks = 20 if date.fromisoformat(start) > update_date else 10
+        return pd.DataFrame({"page": [f"https://{prop[10:]}/item"], "clicks": [clicks], "impressions": [100]})
+
+    monkeypatch.setattr(update_data, "get_gsc_data", fake_gsc)
+    update_date = date.today() - timedelta(days=50)
+    app_test.run()
+    app_test.sidebar.radio[0].set_value("Wpływ aktualizacji Google").run()
+    app_test.multiselect(key="selected_sites").set_value(["a", "b"]).run()
+    app_test.date_input(key="update:start").set_value(update_date).run()
+    app_test.selectbox(key="update:days").set_value(7).run()
+    app_test.button(key="update:run").click().run()
+    assert not app_test.exception
+    assert [tab.label for tab in app_test.tabs] == ["Search", "Discover"]
+    assert len(app_test.get("vega_lite_chart")) == 2
+    assert len(calls) == 12
+    result = app_test.session_state["result:update"]
+    assert set(result["statuses"]["status"]) == {"ok"}
+    assert result["pages"]["clicks_change"].tolist() == [10, 10, 10, 10]
+    app_test.checkbox(key="update:show_sum").check().run()
+    assert not app_test.exception
+    assert len(calls) == 12
+    app_test.date_input(key="update:start").set_value(date.today()).run()
+    assert app_test.button(key="update:run").disabled
+    assert any("Pełny okres po aktualizacji" in warning.value for warning in app_test.warning)
+    assert not app_test.get("vega_lite_chart")
 
 
 @pytest.mark.parametrize("view", VIEWS)

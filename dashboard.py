@@ -29,6 +29,7 @@ from analytics.dashboard import (
     url_candidates,
 )
 from analytics.comparison import build_category_tree
+from analytics.update_analysis import UpdateRequest, collect_update, update_periods
 from analytics.ymyl import tag_ymyl
 from config import ConfigError, load_global_config, load_sites
 
@@ -44,6 +45,7 @@ PRESETS = {
     "Własne daty": 7,
 }
 COLORS = ("#007f75", "#c44240", "#3973b9", "#bb7900", "#9b5390", "#518333", "#cf6341", "#546a76")
+UPDATE_VIEW = "Wpływ aktualizacji Google"
 COLUMN_LABELS = {
     "site_key": "ID serwisu", "site_name": "Serwis", "source": "Źródło",
     "period": "Okres", "date": "Data", "day": "Dzień okresu", "page": "URL", "url": "URL",
@@ -340,6 +342,107 @@ def _download_bundle(bundle):
     st.download_button("Pobierz wszystkie wyniki (ZIP)", buffer.getvalue(), "gsc_dashboard.zip", "application/zip")
 
 
+def _update_chart(daily, request, sites, show_sum):
+    if daily.empty:
+        st.info("Brak danych dziennych dla tego źródła.")
+        return
+    data = daily.copy()
+    data["Data"] = pd.to_datetime(data["date"])
+    labels = {key: f"{sites[key].name} ({key})" for key in request.site_keys}
+    data["Serwis"] = data["site_key"].map(labels)
+    if show_sum:
+        summed = data.groupby("Data", as_index=False)["clicks"].sum(min_count=1)
+        summed["Serwis"] = "Suma serwisów"
+        data = pd.concat([data, summed], ignore_index=True)
+    domain = list(labels.values()) + (["Suma serwisów"] if show_sum else [])
+    colors = [COLORS[list(sites).index(key) % len(COLORS)] for key in request.site_keys] + (["#8b8b8b"] if show_sum else [])
+    line = alt.Chart(data).mark_line().encode(
+        x=alt.X("Data:T", title="Data"),
+        y=alt.Y("clicks:Q", title="Kliknięcia"),
+        color=alt.Color("Serwis:N", scale=alt.Scale(domain=domain, range=colors), legend=alt.Legend(orient="bottom")),
+        tooltip=["Serwis:N", alt.Tooltip("Data:T", format="%Y-%m-%d"), alt.Tooltip("clicks:Q", title="Kliknięcia", format=",.0f")],
+    )
+    markers = pd.DataFrame({"Data": pd.to_datetime(list(dict.fromkeys([request.update_start, request.update_end])))})
+    rules = alt.Chart(markers).mark_rule(color="#c44240", strokeDash=[5, 4]).encode(x="Data:T")
+    st.altair_chart((line + rules).properties(height=340), use_container_width=True)
+
+
+def _render_update(bundle, sites):
+    request, before, after = bundle["request"], bundle["before"], bundle["after"]
+    statuses, daily, pages = bundle["statuses"], bundle["daily"], bundle["pages"]
+    show_sum = st.checkbox("Suma serwisów", key="update:show_sum")
+    if properties_overlap({key: sites[key] for key in request.site_keys}):
+        st.warning("Zakresy wybranych properties nakładają się. Suma może liczyć część ruchu więcej niż raz.")
+    st.caption("Zmiany po aktualizacji nie dowodzą, że to ona je spowodowała. Brak dat w GSC nie musi oznaczać zerowego ruchu.")
+    st.caption("Dane URL mogą być niepełne i różnić się od sum dziennych. Brak URL-a w odpowiedzi nie dowodzi braku ruchu.")
+    for tab, source in zip(st.tabs(["Search", "Discover"]), ("web", "discover")):
+        with tab:
+            source_status = statuses[statuses["source"] == source]
+            for row in source_status.itertuples():
+                if row.status != "ok":
+                    st.warning(f"{row.site_name}: {row.error}")
+            if show_sum and (source_status["status"] != "ok").any():
+                st.warning("Suma i porównania mogą obejmować tylko część wybranych serwisów.")
+            source_daily = select_sources(daily, (source,))
+            _update_chart(source_daily, request, sites, show_sum)
+            successful = set(source_status.loc[source_status["status"] == "ok", "site_key"])
+            if not source_daily.empty and successful:
+                comparison = source_daily[source_daily["site_key"].isin(successful)].copy()
+                comparison = comparison[((comparison["date"] >= before.start) & (comparison["date"] <= before.end)) | ((comparison["date"] >= after.start) & (comparison["date"] <= after.end))].copy()
+                comparison["period"] = comparison["date"].where(comparison["date"] <= before.end, "current")
+                comparison.loc[comparison["date"] <= before.end, "period"] = "previous"
+                overview = daily_overview(comparison)
+                if show_sum:
+                    total = comparison.copy()
+                    total["site_key"], total["site_name"] = "", "Suma serwisów"
+                    overview = pd.concat([overview, daily_overview(total)], ignore_index=True)
+                _table(overview, "Podsumowanie serwisów", f"update_{source}_overview.csv")
+            source_pages = select_sources(pages, (source,))
+            if not source_pages.empty:
+                _table(source_pages[source_pages["clicks_change"] > 0].sort_values("clicks_change", ascending=False).head(20), "URL-e zyskujące", f"update_{source}_gains.csv")
+                _table(source_pages[source_pages["clicks_change"] < 0].sort_values("clicks_change").head(20), "URL-e tracące", f"update_{source}_losses.csv")
+                _table(source_pages.sort_values("clicks_change", ascending=False), "Wszystkie URL-e", f"update_{source}_pages.csv")
+            _table(source_daily, "Dane dzienne", f"update_{source}_daily.csv")
+    _table(statuses, "Status pobierania", "update_statuses.csv")
+
+
+def _update_view(selected, sites, credentials):
+    today = date.today()
+    start = st.sidebar.date_input("Początek aktualizacji", today - timedelta(days=31), key="update:start")
+    has_end = st.sidebar.checkbox("Aktualizacja trwała kilka dni", key="update:has_end")
+    end = st.sidebar.date_input("Koniec aktualizacji", start, key="update:end") if has_end else start
+    days = st.sidebar.selectbox("Długość każdego okresu", (7, 14, 28), index=1, format_func=lambda value: f"{value} dni", key="update:days")
+    use_cache = st.sidebar.checkbox("Użyj cache", value=False, key="update:cache")
+    request = UpdateRequest(selected, start, end, days, use_cache)
+    st.header(UPDATE_VIEW)
+    valid = bool(selected)
+    try:
+        before, after = update_periods(request)
+    except ValueError as exc:
+        st.error(str(exc))
+        valid = False
+    else:
+        st.sidebar.caption(f"Przed: {before.start} — {before.end}")
+        st.sidebar.caption(f"Po: {after.start} — {after.end}")
+        available = today - timedelta(days=app.GSC_LAG_DAYS)
+        if date.fromisoformat(after.end) > available:
+            st.warning(f"Pełny okres po aktualizacji nie jest jeszcze dostępny według przyjętego opóźnienia GSC. Analiza będzie możliwa najwcześniej {date.fromisoformat(after.end) + timedelta(days=app.GSC_LAG_DAYS)}; rzeczywiste opóźnienie może być dłuższe.")
+            valid = False
+    if not selected:
+        st.info("Nie wybrano serwisów.")
+    if st.sidebar.button("Uruchom analizę", type="primary", disabled=not valid, key="update:run"):
+        progress = st.progress(0.0, text="Pobieranie danych")
+        try:
+            st.session_state["result:update"] = collect_update(request, sites, credentials, lambda fraction, name: progress.progress(fraction, text=name))
+        finally:
+            progress.empty()
+    saved = st.session_state.get("result:update")
+    if saved and saved["request"] == request and valid:
+        _render_update(saved, sites)
+    elif saved:
+        st.info("Parametry zostały zmienione. Wyniki wymagają ponownego uruchomienia analizy.")
+
+
 def _render_results(bundle, sites_config, threshold):
     request = bundle["request"]
     for notice in bundle["notices"]:
@@ -425,7 +528,7 @@ def main():
         return
     sites = sites_config.sites
     weekly_view = "Monitoring tygodniowy SEO"
-    view = st.sidebar.radio("Widok", (*VIEWS, weekly_view), key="view")
+    view = st.sidebar.radio("Widok", (*VIEWS, weekly_view, UPDATE_VIEW), key="view")
     actions = st.sidebar.columns(2)
     actions[0].button("Wszystkie", on_click=_set_sites, args=(tuple(sites),))
     actions[1].button("Wyczyść", on_click=_set_sites, args=((),))
@@ -439,6 +542,9 @@ def main():
         global_config = load_global_config()
     except ConfigError as exc:
         st.error(str(exc))
+        return
+    if view == UPDATE_VIEW:
+        _update_view(selected, sites, global_config.google_credentials_path)
         return
     if view == VIEWS[2]:
         sources = ("web",)
