@@ -188,6 +188,11 @@ def _table(frame, title, filename):
     st.download_button("Pobierz CSV", frame.to_csv(index=False).encode("utf-8-sig"), file_name=filename, mime="text/csv", key="download:" + filename)
 
 
+def _clickable_legend(chart, field):
+    selection = alt.selection_point(fields=[field], bind="legend", name="legend_filter")
+    return chart.encode(opacity=alt.condition(selection, alt.value(1), alt.value(0))).add_params(selection)
+
+
 def _chart(daily, request, sites, metric, show_sum, show_previous):
     if daily.empty:
         return
@@ -216,6 +221,7 @@ def _chart(daily, request, sites, metric, show_sum, show_previous):
         strokeDash=alt.StrokeDash("Okres:N", scale=alt.Scale(domain=["Bieżący", "Poprzedni"], range=[[1, 0], [6, 4]]), legend=alt.Legend(orient="bottom")),
         tooltip=["Serwis:N", "Okres:N", alt.Tooltip("Data:T", format="%Y-%m-%d"), alt.Tooltip(f"{metric}:Q", title=metric_label, format=",.0f")],
     ).properties(height=340)
+    chart = _clickable_legend(chart, "Serwis")
     st.altair_chart(chart, use_container_width=True)
     if show_previous:
         st.caption("Poprzedni okres wyrównany po numerze dnia. Dymek pokazuje jego rzeczywistą datę.")
@@ -362,6 +368,7 @@ def _update_chart(daily, request, sites, show_sum):
         color=alt.Color("Serwis:N", scale=alt.Scale(domain=domain, range=colors), legend=alt.Legend(orient="bottom")),
         tooltip=["Serwis:N", alt.Tooltip("Data:T", format="%Y-%m-%d"), alt.Tooltip("clicks:Q", title="Kliknięcia", format=",.0f")],
     )
+    line = _clickable_legend(line, "Serwis")
     markers = pd.DataFrame({"Data": pd.to_datetime(list(dict.fromkeys([request.update_start, request.update_end])))})
     rules = alt.Chart(markers).mark_rule(color="#c44240", strokeDash=[5, 4]).encode(x="Data:T")
     st.altair_chart((line + rules).properties(height=340), use_container_width=True)

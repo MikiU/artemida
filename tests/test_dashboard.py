@@ -110,6 +110,8 @@ def test_update_view_compares_both_sources_and_blocks_unfinished_period(dashboar
     assert not app_test.exception
     assert [tab.label for tab in app_test.tabs] == ["Search", "Discover"]
     assert len(app_test.get("vega_lite_chart")) == 2
+    update_specification = json.loads(app_test.get("vega_lite_chart")[0].proto.spec)
+    assert any(parameter.get("bind") == "legend" for parameter in update_specification["params"])
     assert len(calls) == 12
     result = app_test.session_state["result:update"]
     assert set(result["statuses"]["status"]) == {"ok"}
@@ -141,6 +143,9 @@ def test_all_views_render_selected_sites(dashboard_env, view, site_count):
     assert len(charts) == (1 if view == "Branded search" else 2)
     specification = json.loads(charts[0].proto.spec)
     assert specification["encoding"]["color"]["scale"]["domain"] == [f"{sites[key].name} ({key})" for key in selected]
+    assert any(parameter.get("bind") == "legend" and parameter["select"]["fields"] == ["Serwis"] for parameter in specification["params"])
+    assert specification["encoding"]["opacity"]["condition"]["value"] == 1
+    assert specification["encoding"]["opacity"]["value"] == 0
     assert not [widget for widget in app_test.selectbox if widget.label in ("Serwis", "Wybierz serwis", "Wykres dzienny serwisu")]
     saved = app_test.session_state["result:" + view]
     assert set(saved["daily"]["site_key"]) == set(selected)
